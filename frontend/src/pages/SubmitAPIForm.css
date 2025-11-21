@@ -1,0 +1,154 @@
+.submit-page {
+  padding: 20px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.submit-header {
+  text-align: center;
+  margin-bottom: 40px;
+  color: white;
+}
+
+.submit-header h1 {
+  font-size: 3rem;
+  margin-bottom: 10px;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.submit-header p {
+  font-size: 1.2rem;
+  opacity: 0.9;
+}
+
+.network-warning {
+  margin-top: 15px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 12px;
+  color: #fff;
+  font-weight: 600;
+}
+
+.submit-form {
+  background: white;
+  padding: 40px;
+  border-radius: 15px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+}
+
+.form-section {
+  margin-bottom: 30px;
+}
+
+.form-section h3 {
+  color: #333;
+  margin-bottom: 20px;
+  font-size: 1.5rem;
+  border-bottom: 2px solid #e0e0e0;
+  padding-bottom: 10px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #333;
+}
+
+.input {
+  width: 100%;
+  padding: 12px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 1rem;
+  transition: all 0.2s;
+  box-sizing: border-box;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.form-group small {
+  display: block;
+  margin-top: 5px;
+  color: #666;
+  font-size: 0.85rem;
+}
+
+.error-box {
+  background: #fee;
+  border: 1px solid #fcc;
+  color: #c33;
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.success-box {
+  background: #efe;
+  border: 1px solid #cfc;
+  color: #3c3;
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.success-box a {
+  color: #0369a1;
+  text-decoration: none;
+}
+
+.success-box a:hover {
+  text-decoration: underline;
+}
+
+.form-info {
+  margin-top: 30px;
+  padding: 20px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.form-info p {
+  margin: 10px 0;
+}
+
+.connect-prompt {
+  text-align: center;
+  padding: 60px 20px;
+  background: white;
+  border-radius: 15px;
+  color: #666;
+}
+
+.connect-prompt h2 {
+  margin-bottom: 15px;
+  color: #333;
+}
+
+@media (max-width: 768px) {
+  .submit-header h1 {
+    font-size: 2rem;
+  }
+
+  .submit-form {
+    padding: 20px;
+  }
+}
+
