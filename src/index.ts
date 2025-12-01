@@ -56,7 +56,7 @@ const receiverContract="0x4966baf06bfc7a9b566662bb52cfa718a2f60ee9"
 
 const BASE_RPC_URL = "https://base-mainnet.public.blastapi.io"
 // IAO Token Subgraph URL - queries iaotoken entities by token address (id)
-const IAO_SUBGRAPH_URL = "https://api.goldsky.com/api/public/project_cm8plie9y1pjh01yea3kubv4c/subgraphs/IAO/0.0.1/gn"
+const IAO_SUBGRAPH_URL = "https://api.goldsky.com/api/public/project_cm8plie9y1pjh01yea3kubv4c/subgraphs/IAO/dev/gn"
 const mintPaths = new Set(["/mint-token", "/mint-token/50000"])
 
 let provider: JsonRpcProvider | null = null
