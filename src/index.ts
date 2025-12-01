@@ -476,8 +476,8 @@ app.get('/api/:address', async (req, res) => {
     // Forward request to builder endpoint (payment already verified by paymentMiddleware)
     try {
       // Build builder endpoint URL with query parameters
-      // const builderUrl = new URL(tokenEntry.apiUrl)
-      const builderUrl = new URL("https://api.github.com/users"); // TODO : just for testing purpose
+      const builderUrl = new URL(tokenEntry.apiUrl)
+      // const builderUrl = new URL("https://api.github.com/users"); // TODO : just for testing purpose
        
       // Copy all query parameters from proxy request to builder endpoint
       Object.keys(req.query).forEach(key => {
