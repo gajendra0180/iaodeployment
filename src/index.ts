@@ -3,10 +3,13 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { config } from 'dotenv'
 import cors from 'cors'
-import { paymentMiddleware } from 'x402-express'
-import { facilitator } from '@coinbase/x402'
-import { JsonRpcProvider, Contract, ethers } from 'ethers'
+import { facilitator as thirdwebFacilitatorFn, settlePayment } from 'thirdweb/x402'
+import { createThirdwebClient } from 'thirdweb'
+import { base } from 'thirdweb/chains'
 import fetch from 'node-fetch'
+import { DynamoDBService, IAOTokenDBEntry } from './services/dynamoDBService.js'
+import { UserRequestService } from './services/userRequestService.js'
+import { generateBuilderJWT } from './utils/jwtAuth.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -24,18 +27,15 @@ app.use(express.json())
 // Only serve static files if public directory exists (frontend has been built)
 const publicPath = path.join(__dirname, '..', 'public')
 import { existsSync } from 'fs'
+import { Console } from 'console'
 
 if (existsSync(publicPath)) {
   app.use(express.static(publicPath))
   
   // Serve frontend for all non-API routes (SPA routing)
   app.get('*', (req, res, next) => {
-    // Skip API routes and other backend routes
-    if (req.path.startsWith('/api/') || 
-        req.path.startsWith('/mint-token') ||
-        req.path.startsWith('/healthz') ||
-        req.path.startsWith('/about') ||
-        req.path.startsWith('/api-data')) {
+    // Skip API routes
+    if (req.path.startsWith('/api/')) {
       return next()
     }
     // Serve index.html for frontend routes
@@ -50,167 +50,66 @@ if (existsSync(publicPath)) {
   console.warn('⚠️  Frontend not built yet. Run "cd frontend && npm install && npm run build" to build the frontend.')
 }
 
-// CDP x402 Payment Middleware for protected endpoints
-// const receiverContract = "0x4334c769b915B8fA93707f0256AFA1F85ac83d46"
-const receiverContract="0x4966baf06bfc7a9b566662bb52cfa718a2f60ee9"
-
 const BASE_RPC_URL = "https://base-mainnet.public.blastapi.io"
-// IAO Token Subgraph URL - queries iaotoken entities by token address (id)
-const IAO_SUBGRAPH_URL = "https://api.goldsky.com/api/public/project_cm8plie9y1pjh01yea3kubv4c/subgraphs/IAO/dev/gn"
-const mintPaths = new Set(["/mint-token", "/mint-token/50000"])
 
-let provider: JsonRpcProvider | null = null
-let tokenContract: Contract | null = null
-let tokenDecimals: number | null = null
-let cachedSubgraphSupply: bigint | null = null
-let subgraphSupplyTimestamp = 0
-const SUBGRAPH_CACHE_MS = 15_000
-const MEME_SUPPLY_CAP = 1000_000_000n
-
-if (BASE_RPC_URL) {
-  try {
-    provider = new JsonRpcProvider(BASE_RPC_URL)
-    const tokenAbi = [
-      "function totalSupply() view returns (uint256)",
-      "function decimals() view returns (uint8)"
-    ]
-    tokenContract = new Contract(receiverContract, tokenAbi, provider)
-    console.log("Token contract initialised successfully")
-    console.log("Token contract totalSupply: ", await tokenContract.totalSupply())
-    console.log("Token contract decimals: ", await tokenContract.decimals())
-
-    const subgraphSupply = await getSubgraphSupply()
-    console.log("Subgraph supply: ", subgraphSupply)
-  } catch (error) {
-    console.error("Failed to initialise provider/contract", error)
-    provider = null
-    tokenContract = null
-  }
-} else {
-  console.warn("BASE_RPC_URL not set. Supply checks will be skipped and minting APIs disabled.")
+// JWT Authentication for Builder API
+const BUILDER_SECRET_PHRASE = process.env.BUILDER_SECRET_PHRASE || ""
+if (!BUILDER_SECRET_PHRASE) {
+  console.warn("⚠️  BUILDER_SECRET_PHRASE not set - Builder API authentication will be disabled")
+  console.log("   Set BUILDER_SECRET_PHRASE environment variable to enable JWT authentication")
+  console.log("   This should be a shared secret phrase between you and the builder")
 }
 
-async function ensureSupplyBelowCap(req: express.Request, res: express.Response, next: express.NextFunction) {
-  // Check if path is in mintPaths or starts with /api/ (IAO proxy endpoint)
-  const isMintPath = mintPaths.has(req.path) || req.path.startsWith('/api/')
-  if (!isMintPath) {
-    return next()
-  }
+// DynamoDB Service initialization
+const DYNAMODB_REGION = process.env.DYNAMODB_REGION || "us-east-1"
+const DYNAMODB_TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "iao-tokens"
+const USER_REQUEST_TABLE_NAME = process.env.USER_REQUEST_TABLE_NAME || "iao-user-requests"
+const REQUEST_QUEUE_TABLE_NAME = process.env.REQUEST_QUEUE_TABLE_NAME || "iao-request-queue"
+let dynamoDBService: DynamoDBService | null = null
+let userRequestService: UserRequestService | null = null
 
-  // First, enforce supply based on the subgraph so we gate minting using indexed data
-  try {
-    const subgraphSupply = await getSubgraphSupply()
-    if (subgraphSupply !== null && subgraphSupply >= MEME_SUPPLY_CAP) {
-      return res.status(410).json({
-        error: "Mint closed",
-        message: "Total MEME supply tracked by subgraph has reached 1B. Mint endpoints are no longer available."
-      })
-    }
+try {
+  dynamoDBService = new DynamoDBService(DYNAMODB_REGION, DYNAMODB_TABLE_NAME)
+  const endpoint = process.env.DYNAMODB_ENDPOINT || "AWS (default)"
+  console.log(`✅ DynamoDB service initialized (Region: ${DYNAMODB_REGION}, Table: ${DYNAMODB_TABLE_NAME}, Endpoint: ${endpoint})`)
   } catch (error) {
-    console.error("Error checking subgraph supply", error)
-    return res.status(503).json({
-      error: "Subgraph unavailable",
-      message: "Unable to verify MEME supply from subgraph"
-    })
-  }
-
-  if (!tokenContract) {
-    return res.status(500).json({
-      error: "Minting temporarily unavailable",
-      message: "Token contract is not configured"
-    })
-  }
-
-  try {
-    if (tokenDecimals === null) {
-      try {
-        tokenDecimals = Number(await tokenContract.decimals())
-      } catch (err) {
-        console.warn("Failed to fetch token decimals, defaulting to 18", err)
-        tokenDecimals = 18
-      }
-    }
-
-    const maxSupply = ethers.parseUnits("10000000", tokenDecimals)
-    const totalSupply: bigint = await tokenContract.totalSupply()
-
-    if (totalSupply >= maxSupply) {
-      return res.status(410).json({
-        error: "Mint closed",
-        message: "Total MEME supply has reached 10M. Mint endpoints are no longer available."
-      })
-    }
-
-    return next()
-  } catch (error) {
-    console.error("Error checking token supply", error)
-    return res.status(500).json({
-      error: "Supply check failed",
-      message: "Unable to verify remaining supply"
-    })
-  }
+  console.error("⚠️  Failed to initialize DynamoDB service:", error)
+  console.log("   Set DYNAMODB_REGION and DYNAMODB_TABLE_NAME environment variables if needed")
+  console.log("   For local DynamoDB, set DYNAMODB_ENDPOINT=http://localhost:8000")
 }
 
-app.use(ensureSupplyBelowCap)
+try {
+  userRequestService = new UserRequestService(DYNAMODB_REGION, USER_REQUEST_TABLE_NAME, REQUEST_QUEUE_TABLE_NAME)
+  console.log(`✅ UserRequest service initialized (UserRequest Table: ${USER_REQUEST_TABLE_NAME}, RequestQueue Table: ${REQUEST_QUEUE_TABLE_NAME})`)
+  } catch (error) {
+  console.error("⚠️  Failed to initialize UserRequest service:", error)
+  console.log("   Set USER_REQUEST_TABLE_NAME and REQUEST_QUEUE_TABLE_NAME environment variables if needed")
+}
 
-async function getSubgraphSupply(): Promise<bigint | null> {
-  if (!IAO_SUBGRAPH_URL) {
+
+/**
+ * Extract user address from payment data (X-PAYMENT header)
+ * The payment data is base64-encoded JSON containing the authorization
+ */
+function extractUserAddressFromPayment(paymentData: string): string | null {
+  try {
+    // Decode base64
+    const decoded = Buffer.from(paymentData, 'base64').toString('utf-8')
+    const paymentProof = JSON.parse(decoded)
+    
+    // Extract from address from authorization
+    if (paymentProof?.payload?.authorization?.from) {
+      return paymentProof.payload.authorization.from.toLowerCase()
+    }
+    
+    return null
+  } catch (error) {
+    console.error("Error extracting user address from payment data:", error)
     return null
   }
-  console.log("Getting subgraph supply")
-
-  const now = Date.now()
-  if (cachedSubgraphSupply !== null && now - subgraphSupplyTimestamp < SUBGRAPH_CACHE_MS) {
-    console.log("Cached subgraph supply: ", cachedSubgraphSupply)
-    return cachedSubgraphSupply
-  }
-
-  const query = {
-    query: `
-      {
-        iaotoken(id: "${receiverContract.toLowerCase()}") {
-          subscriptionCount
-        }
-      }
-    `
-  }
-
-  const response = await fetch(IAO_SUBGRAPH_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(query)
-  })
-
-  if (!response.ok) {
-    throw new Error(`Subgraph returned ${response.status}`)
-  }
-
-  console.log("Response: ", response)
-
-  const payload = (await response.json()) as {
-    data?: {
-      iaotoken?: {
-        subscriptionCount?: string
-      }
-    }
-  }
-  console.log("Payload: ", payload)
-  const totalCount = payload?.data?.iaotoken?.subscriptionCount
-  console.log("Total count: ", totalCount)
-  if (!totalCount) {
-    cachedSubgraphSupply = 0n
-    subgraphSupplyTimestamp = now
-    return cachedSubgraphSupply
-  }
-
-  const supply = BigInt(totalCount)
-  cachedSubgraphSupply = supply
-  subgraphSupplyTimestamp = now
-  console.log("Supply: ", supply)
-  return supply
 }
 
-// IAO Token Types (updated schema)
+// IAO Token Types
 interface IAOTokenEntry {
   id: string // Token address (used as identifier)
   apiUrl: string // Builder endpoint URL
@@ -222,231 +121,293 @@ interface IAOTokenEntry {
   paymentToken: string // Payment token address (e.g., USDC)
 }
 
-// Cache for IAO token entries
-const iaoTokenCache = new Map<string, { data: IAOTokenEntry | null; timestamp: number }>()
-const API_REGISTRY_CACHE_MS = 60_000 // Cache for 1 minute
-
 /**
- * Query subgraph for IAO token entry by token address (id)
+ * Get IAO token entry by token address (id) from DynamoDB
  */
 async function getIAOTokenEntry(tokenAddress: string): Promise<IAOTokenEntry | null> {
-  if (!IAO_SUBGRAPH_URL) {
-    console.error("IAO_SUBGRAPH_URL not configured")
-    return null
-  }
-
   const addressLower = tokenAddress.toLowerCase()
-  const now = Date.now()
-  
-  // Check cache
-  const cached = iaoTokenCache.get(addressLower)
-  if (cached && now - cached.timestamp < API_REGISTRY_CACHE_MS) {
-    return cached.data
+
+  if (!dynamoDBService) {
+    console.error("DynamoDB service not configured")
+    return null
   }
 
   try {
-    const query = {
-      query: `
-        {
-          iaotoken(id: "${addressLower}") {
-            id
-            apiUrl
-            builder
-            name
-            symbol
-            subscriptionFee
-            subscriptionTokenAmount
-            paymentToken
-          }
-        }
-      `
-    }
-
-    const response = await fetch(IAO_SUBGRAPH_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(query)
-    })
-
-    if (!response.ok) {
-      throw new Error(`Subgraph returned ${response.status}`)
-    }
-
-    console.log("Response Gajendra: ", response)
-    const payload = (await response.json()) as {
-      data?: {
-        iaotoken?: IAOTokenEntry
+    const dbEntry = await dynamoDBService.getItem(addressLower)
+    if (dbEntry) {
+      // Convert DynamoDB entry to IAOTokenEntry format
+      const tokenEntry: IAOTokenEntry = {
+        id: dbEntry.id,
+        apiUrl: dbEntry.apiUrl,
+        builder: dbEntry.builder,
+        name: dbEntry.name,
+        symbol: dbEntry.symbol,
+        subscriptionFee: dbEntry.subscriptionFee,
+        subscriptionTokenAmount: dbEntry.subscriptionTokenAmount,
+        paymentToken: dbEntry.paymentToken,
       }
-      errors?: Array<{ message: string }>
+      console.log(`✅ Found IAO token in DynamoDB: ${addressLower}`)
+      return tokenEntry
     }
-
-    console.log("Payload Gajendra: ", payload)
-    if (payload.errors) {
-      console.error("Subgraph query errors:", payload.errors)
-      iaoTokenCache.set(addressLower, { data: null, timestamp: now })
-      return null
-    }
-
-    const tokenEntry = payload.data?.iaotoken || null
-    iaoTokenCache.set(addressLower, { data: tokenEntry, timestamp: now })
-    
-    if (tokenEntry) {
-      console.log(`Found IAO token entry for ${addressLower}:`, {
-        name: tokenEntry.name,
-        symbol: tokenEntry.symbol,
-        apiUrl: tokenEntry.apiUrl,
-        subscriptionFee: tokenEntry.subscriptionFee,
-        paymentToken: tokenEntry.paymentToken
-      })
-    } else {
-      console.log(`No IAO token entry found for ${addressLower}`)
-    }
-
-    console.log("Token entry Gajendra: ", tokenEntry)
-    return tokenEntry
+    console.log(`❌ No IAO token entry found for ${addressLower}`)
+    return null
   } catch (error) {
-    console.error(`Error querying IAO token for ${addressLower}:`, error)
-    iaoTokenCache.set(addressLower, { data: null, timestamp: now })
+    console.error(`Error querying DynamoDB for ${addressLower}:`, error)
     return null
   }
 }
 
-// Only add payment middleware if CDP credentials are available
-if (process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET) {
-  console.log("🔐 Adding CDP x402 payment middleware for protected endpoints")
-  
-  app.use(paymentMiddleware(
-    receiverContract, // receiving wallet address
-    {  // Route configurations for protected endpoints
-      "GET /mint-token": {
-        price: "$0.01",
-        network: "base", // Base mainnet
-        config: {
-          description: "Mint 500 MEME tokens for $0.01 USDC (testing tier). MEME supply is 10M and graduates at 100 USDC; endpoint then closes.",
-          mimeType: "application/json",
-          maxTimeoutSeconds: 300,
-          discoverable: true, // Make this endpoint discoverable in x402 Bazaar
-          outputSchema: {
-            type: "object",
-            properties: {
-              payment: {
-                type: "object",
-                properties: {
-                  status: { type: "string", description: "Payment settlement status" },
-                  amount: { type: "string", description: "USDC amount charged" }
-                }
-              },
-              mint: {
-                type: "object",
-                properties: {
-                  tokensMinted: { type: "number", description: "Number of MEME tokens minted" },
-                  message: { type: "string", description: "Summary of minting result" }
-                }
-              }
-            }
-          }
-        }
-      },
-      "GET /mint-token/50000": {
-        price: "$1",
-        network: "base",
-        config: {
-          description: "Mint 50,000 MEME tokens for $1 USDC. MEME supply is 10M and graduates at 100 USDC; endpoint then closes.",
-          mimeType: "application/json",
-          maxTimeoutSeconds: 300,
-          outputSchema: {
-            type: "object",
-            properties: {
-              payment: {
-                type: "object",
-                properties: {
-                  status: { type: "string", description: "Payment settlement status" },
-                  amount: { type: "string", description: "USDC amount charged" }
-                }
-              },
-              mint: {
-                type: "object",
-                properties: {
-                  tokensMinted: { type: "number", description: "Number of MEME tokens minted" },
-                  message: { type: "string", description: "Summary of minting result" }
-                }
-              }
-            }
-          }
-        }
-      },
-      "GET /api/*": {
-        price: "$0.01", // Default price - will be validated against subgraph subscriptionFee in middleware
-        network: "base",
-        config: {
-          description: "IAO Proxy endpoint - routes to registered APIs after payment verification. Actual fee from subgraph.",
-          mimeType: "application/json",
-          maxTimeoutSeconds: 300,
-          discoverable: false // Don't list individual APIs in Bazaar
-        }
-      },
-    },
-    facilitator // CDP facilitator for mainnet
-  ))
+
+// Thirdweb facilitator setup for /api/* routes
+// Create thirdweb client and facilitator instance
+// See: https://portal.thirdweb.com/x402/facilitator
+let thirdwebClient: any = null
+let thirdwebFacilitator: any = null
+
+if (process.env.THIRDWEB_SECRET_KEY && process.env.THIRDWEB_SERVER_WALLET_ADDRESS) {
+  try {
+    thirdwebClient = createThirdwebClient({
+      secretKey: process.env.THIRDWEB_SECRET_KEY,
+    })
+
+    thirdwebFacilitator = thirdwebFacilitatorFn({
+      client: thirdwebClient,
+      serverWalletAddress: process.env.THIRDWEB_SERVER_WALLET_ADDRESS,
+      // Optional: waitUntil can be "simulated", "submitted", or "confirmed" (default)
+      waitUntil: "confirmed",
+    })
+
+    console.log("✅ Thirdweb facilitator initialized for /api/* endpoints")
+  } catch (error) {
+    console.error("⚠️  Failed to initialize Thirdweb facilitator:", error)
+    console.log("   Set THIRDWEB_SECRET_KEY and THIRDWEB_SERVER_WALLET_ADDRESS to enable Thirdweb facilitator")
+  }
 } else {
-  console.log("⚠️  CDP credentials not found - x402 payment middleware not enabled")
-  console.log("   Set CDP_API_KEY_ID and CDP_API_KEY_SECRET to enable payment protection")
+  console.log("⚠️  Thirdweb credentials not found - /api/* routes will not process payments")
+  console.log("   Set THIRDWEB_SECRET_KEY and THIRDWEB_SERVER_WALLET_ADDRESS to enable Thirdweb facilitator")
+  console.log("   Get your secret key from: https://portal.thirdweb.com")
+  console.log("   Get your server wallet address from your project dashboard")
 }
 
-// Home route - HTML
-app.get('/', (req, res) => {
-  res.type('html').send(`
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8"/>
-        <title>X402 MEME Server</title>
-        <link rel="stylesheet" href="/style.css" />
-      </head>
-      <body>
-        <nav>
-          <a href="/">Home</a>
-          <a href="/about">About</a>
-          <a href="/api-data">API Data</a>
-          <a href="/mint-token">Mint Tokens ($0.01)</a>
-          <a href="/mint-token/50000">Mint 50K Tokens ($1)</a>
-          <a href="/healthz">Health</a>
-        </nav>
-        <h1>Welcome to MEME Server with x402 🚀</h1>
-        <p>This is a minimal example with CDP x402 payment integration.</p>
-        <p><strong>New:</strong> Mint 500 meme tokens instantly for $0.01 USDC!</p>
-        <img src="/logo.png" alt="Logo" width="120" />
-      </body>
-    </html>
-  `)
+/**
+ * POST /api/register - Register a new IAO token and API endpoint
+ * 
+ * This endpoint accepts token creation data and stores it in DynamoDB.
+ * The frontend should call this after successfully creating a token on-chain.
+ * 
+ * Request body:
+ * {
+ *   tokenAddress: string (0x...),
+ *   name: string,
+ *   symbol: string,
+ *   apiUrl: string,
+ *   builder: string (0x...),
+ *   paymentToken: string (0x...),
+ *   subscriptionFee: string (BigInt as string),
+ *   subscriptionTokenAmount: string (BigInt as string),
+ *   maxSubscriptionCount?: string (BigInt as string, optional)
+ * }
+ */
+app.post('/api/register', async (req, res) => {
+  try {
+    const {
+      tokenAddress,
+      name,
+      symbol,
+      apiUrl,
+      builder,
+      paymentToken,
+      subscriptionFee,
+      subscriptionTokenAmount,
+      maxSubscriptionCount,
+    } = req.body
+
+    // Validate required fields
+    if (!tokenAddress || !name || !symbol || !apiUrl || !builder || !paymentToken || !subscriptionFee || !subscriptionTokenAmount) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        message: "tokenAddress, name, symbol, apiUrl, builder, paymentToken, subscriptionFee, and subscriptionTokenAmount are required"
+      })
+    }
+
+    // Validate address format
+    const addressRegex = /^0x[a-fA-F0-9]{40}$/i
+    if (!addressRegex.test(tokenAddress) || !addressRegex.test(builder) || !addressRegex.test(paymentToken)) {
+      return res.status(400).json({
+        error: "Invalid address format",
+        message: "tokenAddress, builder, and paymentToken must be valid Ethereum addresses"
+      })
+    }
+
+    // Validate URL format
+    try {
+      new URL(apiUrl)
+    } catch {
+      return res.status(400).json({
+        error: "Invalid API URL",
+        message: "apiUrl must be a valid URL"
+      })
+    }
+
+    // Check if DynamoDB is configured
+    if (!dynamoDBService) {
+      return res.status(503).json({
+        error: "DynamoDB not configured",
+        message: "DynamoDB service is not available. Please configure DYNAMODB_REGION and DYNAMODB_TABLE_NAME"
+      })
+    }
+
+    // Check if token already exists
+    const existingToken = await dynamoDBService.getItem(tokenAddress.toLowerCase())
+    if (existingToken) {
+      return res.status(409).json({
+        error: "Token already registered",
+        message: `Token ${tokenAddress} is already registered`,
+        token: {
+          id: existingToken.id,
+          name: existingToken.name,
+          symbol: existingToken.symbol,
+          apiUrl: existingToken.apiUrl,
+        }
+      })
+    }
+
+    // Create token entry
+    const now = new Date().toISOString()
+    const tokenEntry: IAOTokenDBEntry = {
+      id: tokenAddress.toLowerCase(),
+      name,
+      symbol,
+      apiUrl,
+      builder: builder.toLowerCase(),
+      paymentToken: paymentToken.toLowerCase(),
+      subscriptionFee: subscriptionFee.toString(),
+      subscriptionTokenAmount: subscriptionTokenAmount.toString(),
+      maxSubscriptionCount: maxSubscriptionCount?.toString() || "0",
+      subscriptionCount: "0",
+      refundCount: "0",
+      fulfilledCount: "0",
+      createdAt: now,
+      updatedAt: now,
+    }
+
+    // Store in DynamoDB
+    await dynamoDBService.putItem(tokenEntry)
+
+    console.log(`✅ Registered new IAO token: ${tokenAddress} (${name}/${symbol})`)
+
+    return res.status(201).json({
+      success: true,
+      message: "Token registered successfully",
+      token: {
+        id: tokenEntry.id,
+        name: tokenEntry.name,
+        symbol: tokenEntry.symbol,
+        apiUrl: tokenEntry.apiUrl,
+        builder: tokenEntry.builder,
+        paymentToken: tokenEntry.paymentToken,
+        subscriptionFee: tokenEntry.subscriptionFee,
+        subscriptionTokenAmount: tokenEntry.subscriptionTokenAmount,
+      }
+    })
+  } catch (error: any) {
+    console.error("Error registering token:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to register token"
+    })
+  }
 })
 
-app.get('/about', function (req, res) {
-  res.sendFile(path.join(__dirname, '..', 'components', 'about.htm'))
+/**
+ * GET /api/token/:address - Get token metadata (no payment required)
+ * 
+ * Returns token information from DynamoDB without processing payment
+ * 
+ * @param address - IAO token address
+ */
+app.get('/api/token/:address', async (req, res) => {
+  const tokenAddress = req.params.address
+
+  // Validate address format
+  if (!/^0x[a-fA-F0-9]{40}$/i.test(tokenAddress)) {
+    return res.status(400).json({
+      error: "Invalid address format",
+      message: "Token address must be a valid Ethereum address"
+    })
+  }
+
+  try {
+    const tokenEntry = await getIAOTokenEntry(tokenAddress)
+
+    if (!tokenEntry) {
+      return res.status(404).json({
+        error: "Token not found",
+        message: `No IAO token registered with address ${tokenAddress}`
+      })
+    }
+
+    console.log("All tokens: ", await dynamoDBService.scanAllItems());
+    // Get all user requests
+    const allUserRequests = await userRequestService.scanAllUserRequests();
+
+    // Get all request queue entries
+    const allRequestQueue = await userRequestService.scanAllRequestQueue();
+
+    console.log("All user requests: ", allUserRequests);
+    console.log("All request queue: ", allRequestQueue);
+
+    return res.status(200).json({
+      success: true,
+      token: tokenEntry
+    })
+  } catch (error: any) {
+    console.error("Error fetching token:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch token"
+    })
+  }
 })
 
-// Example API endpoint - JSON
-app.get('/api-data', (req, res) => {
-  res.json({
-    message: 'Here is some sample API data',
-    items: ['apple', 'banana', 'cherry'],
-  })
-})
+/**
+ * GET /api/tokens - Get all registered IAO tokens
+ * Returns all tokens from DynamoDB
+ */
+app.get('/api/tokens', async (req, res) => {
+  try {
+    if (!dynamoDBService) {
+      return res.status(503).json({
+        error: "DynamoDB not configured",
+        message: "DynamoDB service is not available"
+      })
+    }
 
-// Health check
-app.get('/healthz', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() })
+    const tokens = await dynamoDBService.scanAllItems()
+    return res.status(200).json({
+      success: true,
+      count: tokens.length,
+      tokens
+    })
+  } catch (error: any) {
+    console.error("Error fetching all tokens:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch tokens"
+    })
+  }
 })
 
 /**
  * IAO Proxy Endpoint: /api/:address
  * 
- * Flow (same as /mint-token/50000):
- * 1. paymentMiddleware handles payment verification automatically
- * 2. If payment verified, handler queries subgraph and forwards to builder endpoint
- * 3. Return builder response to user
+ * Flow with Thirdweb facilitator:
+ * 1. Query DynamoDB for IAO token entry
+ * 2. Use thirdweb's settlePayment() to verify and process payment
+ * 3. If payment verified, forward request to builder endpoint
+ * 4. Return builder response to user
  * 
- * @param address - IAO token address (id from subgraph)
+ * @param address - IAO token address (id from DynamoDB)
  */
 app.get('/api/:address', async (req, res) => {
   const tokenAddress = req.params.address
@@ -460,7 +421,7 @@ app.get('/api/:address', async (req, res) => {
   }
 
   try {
-    // Query subgraph for IAO token entry
+    // Query DynamoDB for IAO token entry
     const tokenEntry = await getIAOTokenEntry(tokenAddress)
 
     console.log("Token entry Gajendra: ", tokenEntry)
@@ -472,8 +433,102 @@ app.get('/api/:address', async (req, res) => {
       })
     }
 
-    // If we reach this point, payment has been verified by paymentMiddleware (same as /mint-token/50000)
-    // Forward request to builder endpoint (payment already verified by paymentMiddleware)
+    // Verify and process payment using thirdweb's settlePayment
+    if (thirdwebFacilitator && thirdwebClient) {
+      const paymentData = req.headers['x-payment'] as string | undefined
+      
+      // Convert subscription fee from wei to USD string (assuming 6 decimals for USDC)
+      const subscriptionFeeWei = BigInt(tokenEntry.subscriptionFee)
+      const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
+      const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
+
+
+      try {
+        const paymentResult = await settlePayment({
+          resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+          method: req.method,
+          paymentData,
+          payTo: tokenEntry.id,
+          network: base,
+          price: priceString,
+          facilitator: thirdwebFacilitator,
+          routeConfig: {
+            description: `IAO Proxy endpoint - ${tokenEntry.name} (${tokenEntry.symbol})`,
+            mimeType: "application/json",
+            maxTimeoutSeconds: 300,
+          },
+        })
+
+        // If payment not verified, return 402 response
+        if (paymentResult.status !== 200) {
+          return res.status(paymentResult.status).json(paymentResult.responseBody)
+        }
+
+        // Payment verified - create RequestQueue entry
+        if (userRequestService && paymentData) {
+          try {
+            // Decode payment data to extract user address
+            const userAddress = extractUserAddressFromPayment(paymentData)
+            
+            if (userAddress && dynamoDBService) {
+              // Get current subscription count from DynamoDB (this will be the globalRequestNumber)
+              const tokenDBEntry = await dynamoDBService.getItem(tokenAddress.toLowerCase())
+              if (tokenDBEntry) {
+                const currentSubscriptionCount = BigInt(tokenDBEntry.subscriptionCount || "0")
+                const globalRequestNumber = (currentSubscriptionCount + BigInt(1)).toString()
+
+                // Create RequestQueue entry
+                await userRequestService.createRequestQueueEntry(
+                  tokenAddress,
+                  userAddress,
+                  globalRequestNumber
+                )
+
+                // Update token's subscriptionCount in DynamoDB
+                const newSubscriptionCount = (currentSubscriptionCount + BigInt(1)).toString()
+                const updatedTokenEntry: IAOTokenDBEntry = {
+                  ...tokenDBEntry,
+                  subscriptionCount: newSubscriptionCount,
+                  updatedAt: new Date().toISOString(),
+                }
+                await dynamoDBService.putItem(updatedTokenEntry)
+                console.log(`✅ Updated token subscriptionCount: ${newSubscriptionCount}`)
+                console.log(`✅ Created RequestQueue entry for user ${userAddress} (globalRequestNumber: ${globalRequestNumber})`)
+              }
+            }
+          } catch (queueError: any) {
+            // Log error but don't fail the request - payment was already verified
+            console.error("⚠️  Failed to create RequestQueue entry:", queueError)
+          }
+        }
+      } catch (paymentError: any) {
+        console.error("Payment verification error:", paymentError)
+        // If no payment data provided, return 402
+        if (!paymentData) {
+          return res.status(402).json({
+            error: "Payment required",
+            message: "This endpoint requires payment. Please provide X-PAYMENT header.",
+            accepts: [{
+              scheme: "exact",
+              network: "base",
+              payTo: tokenEntry.id,
+              asset: tokenEntry.paymentToken,
+              maxAmountRequired: tokenEntry.subscriptionFee,
+            }],
+          })
+        }
+        return res.status(402).json({
+          error: "Payment verification failed",
+          message: paymentError.message || "Invalid payment proof",
+        })
+      }
+    } else {
+      // If thirdweb facilitator not configured, skip payment verification
+      console.warn("⚠️  Thirdweb facilitator not configured - skipping payment verification for /api/:address")
+    }
+
+    // Payment verified (or skipped if facilitator not configured)
+    // Forward request to builder endpoint
     try {
       // Build builder endpoint URL with query parameters
       const builderUrl = new URL(tokenEntry.apiUrl)
@@ -495,6 +550,23 @@ app.get('/api/:address', async (req, res) => {
           forwardHeaders[key] = Array.isArray(value) ? value.join(', ') : (value || '')
         }
       })
+
+      // Add JWT authentication header if secret phrase is configured
+      if (BUILDER_SECRET_PHRASE) {
+        try {
+          const jwtToken = generateBuilderJWT(
+            tokenAddress,
+            tokenEntry.apiUrl,
+            BUILDER_SECRET_PHRASE,
+            '5m' // Token expires in 5 minutes
+          )
+          forwardHeaders['X-IAO-Auth'] = jwtToken
+          console.log("✅ Added JWT authentication header for builder endpoint")
+        } catch (jwtError: any) {
+          console.error("⚠️  Failed to generate JWT token:", jwtError)
+          // Continue without JWT if generation fails
+        }
+      }
       
       console.log("Fetching from builder endpoint:", builderUrl.toString());
       
@@ -526,7 +598,7 @@ app.get('/api/:address', async (req, res) => {
           parsedData = responseData
         }
 
-        // Return builder response (payment already verified by paymentMiddleware, same as /mint-token/50000)
+        // Return builder response (payment already verified by thirdweb's settlePayment)
         res.status(builderResponse.status).json({
         data: parsedData,
         payment: {
@@ -542,7 +614,7 @@ app.get('/api/:address', async (req, res) => {
         })
 
         // Payment settlement logged - automation will read from subgraph and mint rewards
-        // Same flow as /mint-token/50000 - paymentMiddleware verified payment, automation handles token minting
+        // Thirdweb facilitator verified and processed payment, automation handles token minting
         console.log("Payment settled for API - automation should mint rewards", {
           tokenAddress: tokenEntry.id,
           tokenSymbol: tokenEntry.symbol,
@@ -591,57 +663,25 @@ app.get('/api/:address', async (req, res) => {
   }
 })
 
-// Meme token mint endpoint - $0.01 USDC
-// Payment verification is handled by CDP middleware
-app.get('/mint-token', (req, res) => {
-  // If we reach this point, payment has been verified by CDP middleware
-  res.json({
-    payment: {
-      status: "paid",
-      amount: "$0.01"
-    },
-    mint: {
-      tokensMinted: 500,
-      message: "500 MEME tokens will be delivered to your wallet shortly"
-    },
-    timestamp: new Date().toISOString()
-  })
-})
-
-app.get('/mint-token/50000', (req, res) => {
-  res.json({
-    payment: {
-      status: "paid",
-      amount: "$1"
-    },
-    mint: {
-      tokensMinted: 50000,
-      message: "50,000 MEME tokens will be delivered to your wallet shortly"
-    },
-    timestamp: new Date().toISOString()
-  })
-})
 
 // Start server if running directly (not in Vercel)
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000
   app.listen(PORT, () => {
-    console.log(`🚀 Express server with CDP x402 running on port ${PORT}`)
+    console.log(`🚀 Express server running on port ${PORT}`)
     console.log(`📱 Base URL: http://localhost:${PORT}`)
     console.log(`🔗 Network: Base Mainnet`)
     console.log(`💰 Payment Asset: USDC on Base Mainnet`)
-    console.log(`💰 Facilitator: Coinbase CDP`)
-    console.log(`🌐 Bazaar: Endpoint discoverable in x402 Bazaar`)
+    console.log(`💰 Facilitator: Thirdweb`)
     console.log(`\n📍 Available endpoints:`)
-    console.log(`   GET /                    - Home page`)
-    console.log(`   GET /about               - About page`)
-    console.log(`   GET /api-data            - Sample API data`)
-    console.log(`   GET /api/:address        - IAO Proxy endpoint (query IAO token from subgraph, handle payment, forward to builder)`)
-    console.log(`   GET /mint-token          - Mint 500 tokens for $0.01 USDC`)
-    console.log(`   GET /mint-token/50000    - Mint 50,000 tokens for $1 USDC`)
-    console.log(`   GET /healthz             - Health check`)
-    console.log(`\n⚙️  Set CDP_API_KEY_ID and CDP_API_KEY_SECRET for payment protection`)
-    console.log(`   Set IAO_SUBGRAPH_URL for IAO API registry queries`)
+    console.log(`   POST /api/register       - Register new IAO token and API endpoint in DynamoDB`)
+    console.log(`   GET /api/tokens          - Get all registered IAO tokens`)
+    console.log(`   GET /api/token/:address  - Get token metadata (no payment required)`)
+    console.log(`   GET /api/:address        - IAO Proxy endpoint (query IAO token from DynamoDB, handle payment, forward to builder)`)
+    console.log(`\n⚙️  Configuration:`)
+    console.log(`   - Set THIRDWEB_SECRET_KEY and THIRDWEB_SERVER_WALLET_ADDRESS for payment processing`)
+    console.log(`   - Set DYNAMODB_REGION and DYNAMODB_TABLE_NAME for IAO token storage`)
+    console.log(`   - Set BUILDER_SECRET_PHRASE for JWT authentication with builder endpoints`)
   })
 }
 
