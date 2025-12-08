@@ -5,7 +5,7 @@ import { config } from 'dotenv'
 import cors from 'cors'
 import { facilitator as thirdwebFacilitatorFn, settlePayment } from 'thirdweb/x402'
 import { createThirdwebClient } from 'thirdweb'
-import { base } from 'thirdweb/chains'
+import { baseSepolia } from 'thirdweb/chains'
 import fetch from 'node-fetch'
 import { DynamoDBService, IAOTokenDBEntry } from './services/dynamoDBService.js'
 import { UserRequestService } from './services/userRequestService.js'
@@ -50,7 +50,7 @@ if (existsSync(publicPath)) {
   console.warn('⚠️  Frontend not built yet. Run "cd frontend && npm install && npm run build" to build the frontend.')
 }
 
-const BASE_RPC_URL = "https://base-mainnet.public.blastapi.io"
+const BASE_RPC_URL = "https://sepolia.base.org"
 
 // JWT Authentication for Builder API
 const BUILDER_SECRET_PHRASE = process.env.BUILDER_SECRET_PHRASE || ""
@@ -409,6 +409,14 @@ app.get('/api/tokens', async (req, res) => {
  * 
  * @param address - IAO token address (id from DynamoDB)
  */
+// Handle HEAD requests - facilitator uses these for validation
+app.head('/api/:address', async (req, res) => {
+  // For HEAD requests, just return 200 OK with proper headers
+  // The facilitator uses HEAD to validate the resource exists
+  res.status(200).end()
+})
+
+// Handle GET requests for /api/:address
 app.get('/api/:address', async (req, res) => {
   const tokenAddress = req.params.address
 
@@ -442,14 +450,37 @@ app.get('/api/:address', async (req, res) => {
       const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
       const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
 
-
       try {
+        // Normalize HTTP method - HEAD requests should be treated as GET for payment verification
+        // settlePayment only accepts: GET, POST, PUT, DELETE, PATCH
+        let normalizedMethod = req.method.toUpperCase()
+        if (normalizedMethod === 'HEAD') {
+          normalizedMethod = 'GET'
+        }
+        
+        // Ensure method is one of the supported methods
+        const supportedMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
+        if (!supportedMethods.includes(normalizedMethod)) {
+          normalizedMethod = 'GET' // Default to GET for unsupported methods
+        }
+        
+        console.log("Calling settlePayment with:", {
+          resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+          originalMethod: req.method,
+          normalizedMethod,
+          hasPaymentData: !!paymentData,
+          payTo: tokenEntry.id,
+          network: baseSepolia.id,
+          networkName: baseSepolia.name,
+          price: priceString,
+        });
+        
         const paymentResult = await settlePayment({
           resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-          method: req.method,
+          method: normalizedMethod as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
           paymentData,
           payTo: tokenEntry.id,
-          network: base,
+          network: baseSepolia, // Keep chain object for on-chain operations
           price: priceString,
           facilitator: thirdwebFacilitator,
           routeConfig: {
@@ -458,6 +489,11 @@ app.get('/api/:address', async (req, res) => {
             maxTimeoutSeconds: 300,
           },
         })
+        
+        console.log("settlePayment result:", {
+          status: paymentResult.status,
+          paymentReceipt: paymentResult.status === 200 ? paymentResult.paymentReceipt : undefined,
+        });
 
         // If payment not verified, return 402 response
         if (paymentResult.status !== 200) {
@@ -503,23 +539,51 @@ app.get('/api/:address', async (req, res) => {
         }
       } catch (paymentError: any) {
         console.error("Payment verification error:", paymentError)
+        console.error("Payment error details:", {
+          message: paymentError.message,
+          stack: paymentError.stack,
+          name: paymentError.name,
+          cause: paymentError.cause,
+        })
+        
+        // Check if error is related to HEAD request validation
+        // This happens when facilitator makes internal HEAD request for validation
+        const isHeadRequestError = paymentError.message?.includes('HEAD') || 
+                                   paymentError.message?.includes('invalid_literal')
+        
         // If no payment data provided, return 402
         if (!paymentData) {
+          // For HEAD request errors on testnet, facilitator may not fully support Base Sepolia
+          // Return 402 with payment requirements anyway
+          if (isHeadRequestError) {
+            console.warn("⚠️  Facilitator HEAD request validation failed - this may indicate Base Sepolia support issues")
+          }
+          
           return res.status(402).json({
             error: "Payment required",
             message: "This endpoint requires payment. Please provide X-PAYMENT header.",
             accepts: [{
               scheme: "exact",
-              network: "base",
+              network: `eip155:${baseSepolia.id}`, // Facilitator expects EIP-155 format: eip155:chainId
               payTo: tokenEntry.id,
               asset: tokenEntry.paymentToken,
               maxAmountRequired: tokenEntry.subscriptionFee,
             }],
           })
         }
+        
+        // If payment data provided but verification failed
+        // For HEAD request errors, this might be a facilitator issue with Base Sepolia
+        if (isHeadRequestError) {
+          console.error("⚠️  Payment verification failed due to facilitator HEAD request issue")
+          console.error("   This may indicate that thirdweb facilitator doesn't fully support Base Sepolia testnet")
+          console.error("   Consider using Base mainnet or checking facilitator documentation")
+        }
+        
         return res.status(402).json({
           error: "Payment verification failed",
           message: paymentError.message || "Invalid payment proof",
+          details: paymentError.stack || paymentError.toString(),
         })
       }
     } else {
