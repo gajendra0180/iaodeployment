@@ -29,8 +29,6 @@ export interface IAOTokenDBEntry {
   builder: string; // Builder address (lowercase)
   paymentToken: string; // Payment token address (lowercase)
   subscriptionFee: string; // BigInt as string
-  subscriptionTokenAmount: string; // BigInt as string
-  maxSubscriptionCount?: string; // BigInt as string (optional)
   subscriptionCount: string; // BigInt as string, default "0"
   refundCount: string; // BigInt as string, default "0"
   fulfilledCount: string; // BigInt as string, default "0"
