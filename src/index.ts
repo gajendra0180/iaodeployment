@@ -117,7 +117,6 @@ interface IAOTokenEntry {
   name: string // Token name
   symbol: string // Token symbol
   subscriptionFee: string // Fee amount in smallest unit of payment token
-  subscriptionTokenAmount: string // Amount of tokens to mint
   paymentToken: string // Payment token address (e.g., USDC)
 }
 
@@ -143,7 +142,6 @@ async function getIAOTokenEntry(tokenAddress: string): Promise<IAOTokenEntry | n
         name: dbEntry.name,
         symbol: dbEntry.symbol,
         subscriptionFee: dbEntry.subscriptionFee,
-        subscriptionTokenAmount: dbEntry.subscriptionTokenAmount,
         paymentToken: dbEntry.paymentToken,
       }
       console.log(`✅ Found IAO token in DynamoDB: ${addressLower}`)
@@ -204,8 +202,6 @@ if (process.env.THIRDWEB_SECRET_KEY && process.env.THIRDWEB_SERVER_WALLET_ADDRES
  *   builder: string (0x...),
  *   paymentToken: string (0x...),
  *   subscriptionFee: string (BigInt as string),
- *   subscriptionTokenAmount: string (BigInt as string),
- *   maxSubscriptionCount?: string (BigInt as string, optional)
  * }
  */
 app.post('/api/register', async (req, res) => {
@@ -218,15 +214,13 @@ app.post('/api/register', async (req, res) => {
       builder,
       paymentToken,
       subscriptionFee,
-      subscriptionTokenAmount,
-      maxSubscriptionCount,
     } = req.body
 
     // Validate required fields
-    if (!tokenAddress || !name || !symbol || !apiUrl || !builder || !paymentToken || !subscriptionFee || !subscriptionTokenAmount) {
+    if (!tokenAddress || !name || !symbol || !apiUrl || !builder || !paymentToken || !subscriptionFee) {
       return res.status(400).json({
         error: "Missing required fields",
-        message: "tokenAddress, name, symbol, apiUrl, builder, paymentToken, subscriptionFee, and subscriptionTokenAmount are required"
+        message: "tokenAddress, name, symbol, apiUrl, builder, paymentToken, and subscriptionFee are required"
       })
     }
 
@@ -282,8 +276,6 @@ app.post('/api/register', async (req, res) => {
       builder: builder.toLowerCase(),
       paymentToken: paymentToken.toLowerCase(),
       subscriptionFee: subscriptionFee.toString(),
-      subscriptionTokenAmount: subscriptionTokenAmount.toString(),
-      maxSubscriptionCount: maxSubscriptionCount?.toString() || "0",
       subscriptionCount: "0",
       refundCount: "0",
       fulfilledCount: "0",
@@ -307,7 +299,6 @@ app.post('/api/register', async (req, res) => {
         builder: tokenEntry.builder,
         paymentToken: tokenEntry.paymentToken,
         subscriptionFee: tokenEntry.subscriptionFee,
-        subscriptionTokenAmount: tokenEntry.subscriptionTokenAmount,
       }
     })
   } catch (error: any) {
@@ -682,7 +673,6 @@ app.get('/api/:address', async (req, res) => {
         console.log("Payment settled for API - automation should mint rewards", {
           tokenAddress: tokenEntry.id,
           tokenSymbol: tokenEntry.symbol,
-          subscriptionTokenAmount: tokenEntry.subscriptionTokenAmount,
           builderEndpoint: tokenEntry.apiUrl
         })
 
