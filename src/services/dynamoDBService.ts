@@ -6,10 +6,22 @@ let dynamoDBDocClient: DynamoDBDocumentClient | null = null;
 
 function getDynamoDBClient(region: string): DynamoDBClient {
   if (!dynamoDBClient) {
-    dynamoDBClient = new DynamoDBClient({
+    // Connect to deployed AWS DynamoDB instance by default
+    // Uses AWS credentials from environment variables, IAM roles, or AWS credentials file
+    // For local testing, set DYNAMODB_ENDPOINT environment variable (e.g., http://localhost:8000)
+    const config: { region: string; endpoint?: string } = {
       region,
-      endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
-    });
+    };
+    
+    // Only set endpoint if explicitly provided for local testing
+    // if (process.env.DYNAMODB_ENDPOINT) {
+    //   config.endpoint = process.env.DYNAMODB_ENDPOINT;
+    //   console.log(`🔧 Using local DynamoDB endpoint: ${config.endpoint}`);
+    // } else {
+    //   console.log(`🌐 Connecting to deployed AWS DynamoDB in region: ${region}`);
+    // }
+    
+    dynamoDBClient = new DynamoDBClient(config);
   }
   return dynamoDBClient;
 }

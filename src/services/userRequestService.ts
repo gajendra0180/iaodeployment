@@ -7,8 +7,8 @@ let dynamoDBDocClient: DynamoDBDocumentClient | null = null;
 function getDynamoDBClient(region: string): DynamoDBClient {
   if (!dynamoDBClient) {
     dynamoDBClient = new DynamoDBClient({
-      region,
-      endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
+      region
+      // endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
     });
   }
   return dynamoDBClient;

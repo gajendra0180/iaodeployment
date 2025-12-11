@@ -61,10 +61,10 @@ if (!BUILDER_SECRET_PHRASE) {
 }
 
 // DynamoDB Service initialization
-const DYNAMODB_REGION = process.env.DYNAMODB_REGION || "us-east-1"
-const DYNAMODB_TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || "iao-tokens"
-const USER_REQUEST_TABLE_NAME = process.env.USER_REQUEST_TABLE_NAME || "iao-user-requests"
-const REQUEST_QUEUE_TABLE_NAME = process.env.REQUEST_QUEUE_TABLE_NAME || "iao-request-queue"
+const DYNAMODB_REGION = "us-west-1"
+const DYNAMODB_TABLE_NAME = "apix-iao-tokens"
+const USER_REQUEST_TABLE_NAME = "apix-iao-user-requests"
+const REQUEST_QUEUE_TABLE_NAME = "apix-iao-request-queue"
 let dynamoDBService: DynamoDBService | null = null
 let userRequestService: UserRequestService | null = null
 
@@ -631,12 +631,14 @@ app.get('/api/:address', async (req, res) => {
       
       try {
         // Add timeout and connection settings for better reliability
+        // Request without zstd compression (Node.js fetch doesn't support zstd decompression)
         const builderResponse = await fetch(builderUrl.toString(), {
           method: req.method,
           headers: {
             ...forwardHeaders,
             'User-Agent': 'IAO-Proxy/1.0',
-            'Accept': 'application/json, */*'
+            'Accept': 'application/json, */*',
+            'Accept-Encoding': 'identity' // Request no compression to avoid zstd issues - Node.js fetch doesn't support zstd
           },
           // Forward body if present (for POST/PUT requests)
           body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
@@ -644,17 +646,107 @@ app.get('/api/:address', async (req, res) => {
         });
         clearTimeout(timeoutId);
 
-        // Get response data
-        const responseData = await builderResponse.text()
+        // Get response data - handle JSON and text responses properly
         let parsedData: any
-        try {
-          parsedData = JSON.parse(responseData)
-        } catch {
-          parsedData = responseData
+        const contentType = builderResponse.headers.get('content-type') || ''
+        const contentEncoding = builderResponse.headers.get('content-encoding') || ''
+        
+        console.log("Builder response headers:", {
+          contentType,
+          contentEncoding,
+          status: builderResponse.status
+        })
+        
+        // Handle zstd compression - Node.js fetch doesn't automatically decompress zstd
+        if (contentEncoding && contentEncoding.toLowerCase().includes('zstd')) {
+          console.warn("⚠️  Response header indicates zstd compression - attempting to parse anyway")
+          console.warn("⚠️  Note: Node.js fetch doesn't support zstd decompression, but sometimes the header is incorrect")
+          
+          // Try to parse the response anyway - sometimes the Content-Encoding header is wrong
+          // or the server sends uncompressed data despite the header
+          try {
+            const responseText = await builderResponse.text()
+            console.log("Response as text (first 200 chars):", responseText.substring(0, 200))
+            
+            // Check if it looks like valid JSON (starts with { or [)
+            if (responseText.trim().startsWith('{') || responseText.trim().startsWith('[')) {
+              try {
+                parsedData = JSON.parse(responseText)
+                console.log("✅ Successfully parsed zstd-flagged response as JSON (header may have been incorrect)")
+              } catch (parseError: any) {
+                // If JSON parsing fails, it might actually be compressed
+                console.error("❌ Failed to parse as JSON - response may actually be zstd compressed")
+                parsedData = {
+                  error: "Unsupported compression",
+                  message: "The API response is compressed with zstd, which is not supported. Please configure the API server to use gzip, deflate, or no compression.",
+                  contentType,
+                  contentEncoding,
+                  suggestion: "The API server should be configured to not use zstd compression, or to respect the Accept-Encoding header"
+                }
+              }
+            } else {
+              // Doesn't look like JSON - likely actually compressed
+              console.error("❌ Response doesn't look like JSON - likely actually zstd compressed")
+              parsedData = {
+                error: "Unsupported compression",
+                message: "The API response is compressed with zstd, which is not supported. Please configure the API server to use gzip, deflate, or no compression.",
+                contentType,
+                contentEncoding,
+                suggestion: "The API server should be configured to not use zstd compression"
+              }
+            }
+          } catch (textError: any) {
+            console.error("❌ Error reading zstd-flagged response:", textError)
+            parsedData = {
+              error: "Unsupported compression",
+              message: "The API response is compressed with zstd, which is not supported.",
+              contentType,
+              contentEncoding
+            }
+          }
+        } else {
+          try {
+            if (contentType.includes('application/json')) {
+              // If content-type is JSON, parse it directly (handles gzip/deflate/br decompression automatically)
+              parsedData = await builderResponse.json()
+              console.log("✅ Parsed as JSON successfully, type:", typeof parsedData, Array.isArray(parsedData) ? 'array' : 'object')
+            } else {
+              // Otherwise, get as text and try to parse
+              const responseText = await builderResponse.text()
+              console.log("Response as text (first 200 chars):", responseText.substring(0, 200))
+              try {
+                parsedData = JSON.parse(responseText)
+                console.log("✅ Parsed text as JSON successfully")
+              } catch (parseError: any) {
+                // If not valid JSON, return as string
+                console.warn("⚠️  Response is not valid JSON, returning as text")
+                parsedData = responseText
+              }
+            }
+          } catch (parseError: any) {
+            console.error("❌ Error parsing builder response:", parseError.message || parseError)
+            // Check if it's a zstd-related error
+            if (parseError.message && parseError.message.includes('zstd')) {
+              parsedData = {
+                error: "Unsupported compression",
+                message: "The API response appears to be zstd compressed, which is not supported.",
+                contentType,
+                contentEncoding
+              }
+            } else {
+              parsedData = { 
+                error: "Failed to parse response", 
+                message: parseError.message || "Unable to decode response",
+                contentType,
+                contentEncoding
+              }
+            }
+          }
         }
 
         // Return builder response (payment already verified by thirdweb's settlePayment)
-        res.status(builderResponse.status).json({
+        // Ensure proper JSON encoding
+        res.status(builderResponse.status).setHeader('Content-Type', 'application/json; charset=utf-8').json({
         data: parsedData,
         payment: {
           status: "paid",

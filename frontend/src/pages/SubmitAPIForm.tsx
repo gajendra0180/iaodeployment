@@ -269,7 +269,7 @@ export function SubmitAPIForm() {
               <p>
                 Transaction:{" "}
                 <a
-                  href={`https://basescan.org/tx/${txHash}`}
+                  href={`https://sepolia.basescan.org/tx/${txHash}`}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
