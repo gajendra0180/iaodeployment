@@ -817,7 +817,6 @@ if (process.env.NODE_ENV !== 'production') {
     console.log(`🚀 Express server running on port ${PORT}`)
     console.log(`📱 Base URL: http://localhost:${PORT}`)
     console.log(`🔗 Network: Base Mainnet`)
-    console.log(`💰 Payment Asset: USDC on Base Mainnet`)
     console.log(`💰 Facilitator: Thirdweb`)
     console.log(`\n📍 Available endpoints:`)
     console.log(`   POST /api/register       - Register new IAO token and API endpoint in DynamoDB`)
