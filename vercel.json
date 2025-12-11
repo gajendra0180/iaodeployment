@@ -3,11 +3,6 @@
   "buildCommand": "yarn build",
   "installCommand": "yarn install --frozen-lockfile",
   "framework": null,
-  "functions": {
-    "api/index.js": {
-      "runtime": "nodejs20.x"
-    }
-  },
   "rewrites": [
     {
       "source": "/(.*)",
