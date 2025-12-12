@@ -7,11 +7,42 @@ let dynamoDBDocClient: DynamoDBDocumentClient | null = null;
 function getDynamoDBClient(region: string): DynamoDBClient {
   if (!dynamoDBClient) {
     // Connect to deployed AWS DynamoDB instance by default
-    // Uses AWS credentials from environment variables, IAM roles, or AWS credentials file
+    // AWS SDK v3 uses the default credential chain in this order:
+    // 1. Explicit credentials passed to the client (via credentials option)
+    // 2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN)
+    // 3. AWS credentials file (~/.aws/credentials)
+    // 4. IAM roles (if running on EC2, Lambda, ECS, etc.)
+    // 
+    // For Vercel deployment, set these environment variables:
+    // - AWS_ACCESS_KEY_ID
+    // - AWS_SECRET_ACCESS_KEY
+    // - AWS_REGION (or use DYNAMODB_REGION)
+    //
     // For local testing, set DYNAMODB_ENDPOINT environment variable (e.g., http://localhost:8000)
-    const config: { region: string; endpoint?: string } = {
+    const config: { 
+      region: string; 
+      endpoint?: string;
+      credentials?: {
+        accessKeyId: string;
+        secretAccessKey: string;
+        sessionToken?: string;
+      };
+    } = {
       region,
     };
+    
+    // Explicitly set credentials if provided via environment variables
+    // This is optional - if not set, AWS SDK will use the default credential chain
+    if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+      config.credentials = {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+        ...(process.env.AWS_SESSION_TOKEN && { sessionToken: process.env.AWS_SESSION_TOKEN }),
+      };
+      console.log(`🔑 Using explicit AWS credentials from environment variables`);
+    } else {
+      console.log(`🔍 Using AWS SDK default credential chain (env vars, credentials file, or IAM role)`);
+    }
     
     // Only set endpoint if explicitly provided for local testing
     // if (process.env.DYNAMODB_ENDPOINT) {
