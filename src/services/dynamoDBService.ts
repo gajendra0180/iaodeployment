@@ -70,20 +70,22 @@ function getDynamoDBDocClient(region: string): DynamoDBDocumentClient {
  */
 export interface ApiEntry {
   index: number;        // 0-based index (order of registration)
+  slug: string;         // Unique slug within the token (e.g., "eigenpie-pool")
   name: string;         // API name/title
-  apiUrl: string;       // Builder's API endpoint URL
-  description?: string; // Optional description
+  apiUrl: string;       // Builder's API endpoint URL (hidden from public)
+  description: string;  // Required description
   createdAt: string;    // ISO timestamp when this API was added
 }
 
 /**
- * IAO Token database entry
+ * IAO Token database entry (represents a server/builder)
  * One token can have multiple APIs (1:N relationship)
  * All APIs under a token share the same subscription fee and payment token
  */
 export interface IAOTokenDBEntry {
   id: string;                    // Token address (lowercase) - Primary Key
-  name: string;                  // Token name
+  slug: string;                  // Unique server slug (e.g., "magpie")
+  name: string;                  // Token/server name
   symbol: string;                // Token symbol
   builder: string;               // Builder address (lowercase)
   paymentToken: string;          // Payment token address (lowercase)
@@ -91,8 +93,7 @@ export interface IAOTokenDBEntry {
   subscriptionCount: string;     // BigInt as string, default "0" - aggregated across all APIs
   refundCount: string;           // BigInt as string, default "0"
   fulfilledCount: string;        // BigInt as string, default "0"
-  apis: ApiEntry[];              // Array of registered APIs (NEW)
-  apiUrl?: string;               // DEPRECATED: For backward compatibility, use apis[0].apiUrl
+  apis: ApiEntry[];              // Array of registered APIs
   createdAt: string;             // ISO timestamp
   updatedAt: string;             // ISO timestamp
 }
@@ -187,18 +188,57 @@ class DynamoDBService {
   }
 
   /**
+   * Get a token by its slug
+   */
+  async getItemBySlug(slug: string): Promise<IAOTokenDBEntry | null> {
+    const params = {
+      TableName: this.tableName,
+      FilterExpression: "#slug = :slug",
+      ExpressionAttributeNames: {
+        "#slug": "slug"
+      },
+      ExpressionAttributeValues: {
+        ":slug": slug.toLowerCase()
+      }
+    };
+
+    try {
+      const data = await this.ddbDocClient.send(new ScanCommand(params));
+      const items = data.Items as IAOTokenDBEntry[];
+      return items && items.length > 0 ? items[0] : null;
+    } catch (err) {
+      console.error(`❌ DynamoDB getItemBySlug fail for ${slug}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Check if a server slug already exists
+   */
+  async slugExists(slug: string): Promise<boolean> {
+    const token = await this.getItemBySlug(slug);
+    return token !== null;
+  }
+
+  /**
    * Add a new API to an existing token
    * The new API will be assigned the next available index
    */
-  async addApiToToken(tokenAddress: string, apiName: string, apiUrl: string, description?: string): Promise<ApiEntry | null> {
+  async addApiToToken(tokenAddress: string, apiSlug: string, apiName: string, apiUrl: string, description: string): Promise<ApiEntry | null> {
     const token = await this.getItem(tokenAddress);
     if (!token) {
       console.error(`❌ Token ${tokenAddress} not found`);
       return null;
     }
 
-    // Ensure apis array exists (for backward compatibility)
+    // Ensure apis array exists
     const apis = token.apis || [];
+    
+    // Check if API slug already exists within this token
+    if (apis.some(api => api.slug === apiSlug.toLowerCase())) {
+      console.error(`❌ API slug ${apiSlug} already exists in token ${tokenAddress}`);
+      return null;
+    }
     
     // Calculate next index
     const nextIndex = apis.length;
@@ -206,6 +246,7 @@ class DynamoDBService {
     // Create new API entry
     const newApi: ApiEntry = {
       index: nextIndex,
+      slug: apiSlug.toLowerCase(),
       name: apiName,
       apiUrl: apiUrl,
       description: description,
@@ -223,28 +264,28 @@ class DynamoDBService {
     };
 
     await this.putItem(updatedToken);
-    console.log(`✅ Added API ${apiName} (index: ${nextIndex}) to token ${tokenAddress}`);
+    console.log(`✅ Added API ${apiName} (slug: ${apiSlug}, index: ${nextIndex}) to token ${tokenAddress}`);
     
     return newApi;
+  }
+
+  /**
+   * Get a specific API from a token by slug
+   */
+  getApiBySlug(token: IAOTokenDBEntry, apiSlug: string): ApiEntry | null {
+    if (!token.apis || token.apis.length === 0) {
+      return null;
+    }
+    return token.apis.find(api => api.slug === apiSlug.toLowerCase()) || null;
   }
 
   /**
    * Get a specific API from a token by index
    */
   getApiByIndex(token: IAOTokenDBEntry, index: number): ApiEntry | null {
-    // Handle backward compatibility - if apis array doesn't exist but apiUrl does
     if (!token.apis || token.apis.length === 0) {
-      if (token.apiUrl && index === 0) {
-        return {
-          index: 0,
-          name: token.name,
-          apiUrl: token.apiUrl,
-          createdAt: token.createdAt,
-        };
-      }
       return null;
     }
-
     return token.apis.find(api => api.index === index) || null;
   }
 }
