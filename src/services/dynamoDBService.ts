@@ -64,19 +64,37 @@ function getDynamoDBDocClient(region: string): DynamoDBDocumentClient {
   return dynamoDBDocClient;
 }
 
+/**
+ * Individual API entry within a token
+ * Multiple APIs can be registered under a single token
+ */
+export interface ApiEntry {
+  index: number;        // 0-based index (order of registration)
+  name: string;         // API name/title
+  apiUrl: string;       // Builder's API endpoint URL
+  description?: string; // Optional description
+  createdAt: string;    // ISO timestamp when this API was added
+}
+
+/**
+ * IAO Token database entry
+ * One token can have multiple APIs (1:N relationship)
+ * All APIs under a token share the same subscription fee and payment token
+ */
 export interface IAOTokenDBEntry {
-  id: string; // Token address (lowercase)
-  name: string;
-  symbol: string;
-  apiUrl: string;
-  builder: string; // Builder address (lowercase)
-  paymentToken: string; // Payment token address (lowercase)
-  subscriptionFee: string; // BigInt as string
-  subscriptionCount: string; // BigInt as string, default "0"
-  refundCount: string; // BigInt as string, default "0"
-  fulfilledCount: string; // BigInt as string, default "0"
-  createdAt: string; // ISO timestamp
-  updatedAt: string; // ISO timestamp
+  id: string;                    // Token address (lowercase) - Primary Key
+  name: string;                  // Token name
+  symbol: string;                // Token symbol
+  builder: string;               // Builder address (lowercase)
+  paymentToken: string;          // Payment token address (lowercase)
+  subscriptionFee: string;       // BigInt as string - same for all APIs
+  subscriptionCount: string;     // BigInt as string, default "0" - aggregated across all APIs
+  refundCount: string;           // BigInt as string, default "0"
+  fulfilledCount: string;        // BigInt as string, default "0"
+  apis: ApiEntry[];              // Array of registered APIs (NEW)
+  apiUrl?: string;               // DEPRECATED: For backward compatibility, use apis[0].apiUrl
+  createdAt: string;             // ISO timestamp
+  updatedAt: string;             // ISO timestamp
 }
 
 class DynamoDBService {
@@ -166,6 +184,68 @@ class DynamoDBService {
       console.error(`❌ DynamoDB scanItemsByBuilder error for ${builderAddress}:`, err);
       throw err;
     }
+  }
+
+  /**
+   * Add a new API to an existing token
+   * The new API will be assigned the next available index
+   */
+  async addApiToToken(tokenAddress: string, apiName: string, apiUrl: string, description?: string): Promise<ApiEntry | null> {
+    const token = await this.getItem(tokenAddress);
+    if (!token) {
+      console.error(`❌ Token ${tokenAddress} not found`);
+      return null;
+    }
+
+    // Ensure apis array exists (for backward compatibility)
+    const apis = token.apis || [];
+    
+    // Calculate next index
+    const nextIndex = apis.length;
+    
+    // Create new API entry
+    const newApi: ApiEntry = {
+      index: nextIndex,
+      name: apiName,
+      apiUrl: apiUrl,
+      description: description,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Add to apis array
+    apis.push(newApi);
+
+    // Update token
+    const updatedToken: IAOTokenDBEntry = {
+      ...token,
+      apis: apis,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.putItem(updatedToken);
+    console.log(`✅ Added API ${apiName} (index: ${nextIndex}) to token ${tokenAddress}`);
+    
+    return newApi;
+  }
+
+  /**
+   * Get a specific API from a token by index
+   */
+  getApiByIndex(token: IAOTokenDBEntry, index: number): ApiEntry | null {
+    // Handle backward compatibility - if apis array doesn't exist but apiUrl does
+    if (!token.apis || token.apis.length === 0) {
+      if (token.apiUrl && index === 0) {
+        return {
+          index: 0,
+          name: token.name,
+          apiUrl: token.apiUrl,
+          createdAt: token.createdAt,
+        };
+      }
+      return null;
+    }
+
+    return token.apis.find(api => api.index === index) || null;
   }
 }
 
