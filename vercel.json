@@ -1,12 +1,16 @@
 {
   "version": 2,
   "buildCommand": "yarn build",
-  "installCommand": "yarn install --frozen-lockfile",
-  "framework": null,
-  "rewrites": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index"
+      "src": "api/index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.js"
     }
   ]
 }
