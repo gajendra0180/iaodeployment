@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc",
+    "build": "tsc && cp -r dist api/dist",
     "start": "node dist/src/index.js"
   },
   "keywords": [],
