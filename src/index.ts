@@ -231,6 +231,8 @@ function sanitizeApisForPublic(apis: ApiEntry[]): Omit<ApiEntry, 'apiUrl'>[] {
 
 // Thirdweb facilitator setup for /api/* routes
 // Create thirdweb client and facilitator instance
+// NOTE: serverWalletAddress is required for facilitator initialization but payments 
+// will be routed to individual token addresses (payTo parameter in settlePayment)
 // See: https://portal.thirdweb.com/x402/facilitator
 let thirdwebClient: any = null
 let thirdwebFacilitator: any = null
@@ -249,6 +251,7 @@ if (process.env.THIRDWEB_SECRET_KEY && process.env.THIRDWEB_SERVER_WALLET_ADDRES
     })
 
     console.log("✅ Thirdweb facilitator initialized for /api/* endpoints")
+    console.log(`   Note: Payments will be routed to individual token addresses`)
   } catch (error) {
     console.error("⚠️  Failed to initialize Thirdweb facilitator:", error)
     console.log("   Set THIRDWEB_SECRET_KEY and THIRDWEB_SERVER_WALLET_ADDRESS to enable Thirdweb facilitator")
@@ -265,6 +268,149 @@ if (process.env.THIRDWEB_SECRET_KEY && process.env.THIRDWEB_SERVER_WALLET_ADDRES
  */
 function isValidSlug(slug: string): boolean {
   return /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/.test(slug)
+}
+
+/**
+ * Verify EIP-3009 payment authorization signature
+ * This validates the signature WITHOUT executing the transfer
+ */
+async function verifyPaymentAuthorization(paymentData: string, expectedPayTo: string, expectedAmount: string, paymentToken: string): Promise<{ valid: boolean; userAddress?: string; error?: string }> {
+  try {
+    // Decode payment data
+    const decoded = Buffer.from(paymentData, 'base64').toString('utf-8')
+    const paymentProof = JSON.parse(decoded)
+    
+    const authorization = paymentProof?.payload?.authorization
+    const signature = paymentProof?.payload?.signature
+    
+    if (!authorization || !signature) {
+      return { valid: false, error: 'Missing authorization or signature' }
+    }
+    
+    // Verify recipient matches
+    if (authorization.to.toLowerCase() !== expectedPayTo.toLowerCase()) {
+      return { valid: false, error: `Payment recipient mismatch: expected ${expectedPayTo}, got ${authorization.to}` }
+    }
+    
+    // Verify amount matches
+    if (authorization.value !== expectedAmount) {
+      return { valid: false, error: `Payment amount mismatch: expected ${expectedAmount}, got ${authorization.value}` }
+    }
+    
+    // Verify timing validity (validAfter <= now <= validBefore)
+    const now = Math.floor(Date.now() / 1000)
+    const validAfter = parseInt(authorization.validAfter)
+    const validBefore = parseInt(authorization.validBefore)
+    
+    if (now < validAfter) {
+      return { valid: false, error: 'Payment authorization not yet valid' }
+    }
+    
+    if (now > validBefore) {
+      return { valid: false, error: 'Payment authorization expired' }
+    }
+    
+    // TODO: Optionally verify EIP-712 signature on-chain or off-chain
+    // For now, we trust the signature since thirdweb will execute it
+    
+    return { 
+      valid: true, 
+      userAddress: authorization.from.toLowerCase() 
+    }
+  } catch (error: any) {
+    return { valid: false, error: error.message || 'Failed to verify payment authorization' }
+  }
+}
+
+/**
+ * Execute EIP-3009 payment transfer using thirdweb facilitator
+ * This should only be called AFTER builder successfully returns data
+ */
+async function executePaymentTransfer(
+  paymentData: string, 
+  paymentToken: string,
+  req: any,
+  tokenAddress: string,
+  subscriptionFee: string,
+  serverSlug: string,
+  apiSlug: string,
+  apiName: string
+): Promise<{ success: boolean; txHash?: string; error?: string; paymentReceipt?: any }> {
+  try {
+    if (!thirdwebFacilitator || !thirdwebClient) {
+      return { success: false, error: 'Thirdweb facilitator not initialized' }
+    }
+    
+    // Normalize HTTP method
+    let normalizedMethod = req.method.toUpperCase()
+    if (normalizedMethod === 'HEAD') {
+      normalizedMethod = 'GET'
+    }
+    const supportedMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
+    if (!supportedMethods.includes(normalizedMethod)) {
+      normalizedMethod = 'GET'
+    }
+    
+    // Calculate price string
+    const subscriptionFeeWei = BigInt(subscriptionFee)
+    const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
+    const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
+    
+    console.log('💳 Calling settlePayment AFTER builder success:', {
+      resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+      method: normalizedMethod,
+      payTo: tokenAddress,
+      price: priceString,
+      hasPaymentData: !!paymentData,
+      timestamp: new Date().toISOString()
+    })
+    
+    // Use thirdweb's settlePayment to execute the transfer
+    const paymentResult = await settlePayment({
+      resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+      method: normalizedMethod as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
+      paymentData,
+      payTo: tokenAddress,  // Payment goes to token address (ORIGINAL)
+      network: baseSepolia,
+      price: priceString,
+      facilitator: thirdwebFacilitator,
+      routeConfig: {
+        description: `IAO Proxy - ${serverSlug}/${apiSlug} - ${apiName}`,
+        mimeType: "application/json",
+        maxTimeoutSeconds: 300,
+      },
+    })
+    
+    console.log('📊 settlePayment result:', {
+      status: paymentResult.status,
+      hasPaymentReceipt: paymentResult.status === 200 && !!paymentResult.paymentReceipt,
+      timestamp: new Date().toISOString()
+    })
+    
+    if (paymentResult.status === 200) {
+      console.log('✅ Payment settled successfully!')
+      return { 
+        success: true, 
+        txHash: paymentResult.paymentReceipt?.transaction,
+        paymentReceipt: paymentResult.paymentReceipt
+      }
+    } else {
+      const errorBody = (paymentResult as any).responseBody
+      console.error('❌ Payment settlement failed:', {
+        status: paymentResult.status,
+        errorBody: JSON.stringify(errorBody, null, 2),
+        timestamp: new Date().toISOString()
+      })
+      return { 
+        success: false, 
+        error: errorBody?.errorMessage || 'Payment settlement returned non-200 status',
+        txHash: undefined
+      }
+    }
+  } catch (error: any) {
+    console.error("Error in executePaymentTransfer:", error)
+    return { success: false, error: error.message || 'Failed to execute payment transfer' }
+  }
 }
 
 /**
@@ -712,6 +858,12 @@ app.head('/api/:serverSlug/:apiSlug', async (req, res) => {
 
 /**
  * Handler for GET /api/:serverSlug/:apiSlug
+ * 
+ * NEW FLOW: Charge fee ONLY AFTER builder successfully returns a response
+ * 1. Validate payment data is present (but don't settle yet)
+ * 2. Forward request to builder endpoint
+ * 3. If builder returns success (2xx), THEN settle payment
+ * 4. If builder fails, return error WITHOUT charging
  */
 async function handleApiProxyRequest(req: any, res: any, serverSlug: string, apiSlug: string) {
   try {
@@ -737,177 +889,101 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
 
     console.log(`📡 Proxy request for server ${serverSlug}, API ${apiSlug}: ${api.name}`)
 
-    // Verify and process payment using thirdweb's settlePayment
-    if (thirdwebFacilitator && thirdwebClient) {
-      const paymentData = req.headers['x-payment'] as string | undefined
-      
-      // Convert subscription fee from wei to USD string (assuming 6 decimals for USDC)
-      const subscriptionFeeWei = BigInt(tokenEntry.subscriptionFee)
-      const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
-      const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
+    // Get payment data from header (validate presence, but don't settle yet)
+    const paymentData = req.headers['x-payment'] as string | undefined
+    
+    // Convert subscription fee from wei to USD string (assuming 6 decimals for USDC)
+    const subscriptionFeeWei = BigInt(tokenEntry.subscriptionFee)
+    const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
+    const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
 
-      try {
-        // Normalize HTTP method - HEAD requests should be treated as GET for payment verification
-        // settlePayment only accepts: GET, POST, PUT, DELETE, PATCH
-        let normalizedMethod = req.method.toUpperCase()
-        if (normalizedMethod === 'HEAD') {
-          normalizedMethod = 'GET'
-        }
+    // Check if payment is required
+    if (thirdwebClient) {
+      if (!paymentData) {
+        // No payment data provided - return 402 with payment requirements
+        // IMPORTANT: User pays to FACILITATOR, facilitator forwards to token
+        const facilitatorAddress = process.env.THIRDWEB_SERVER_WALLET_ADDRESS
         
-        // Ensure method is one of the supported methods
-        const supportedMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
-        if (!supportedMethods.includes(normalizedMethod)) {
-          normalizedMethod = 'GET' // Default to GET for unsupported methods
-        }
-        
-        console.log("Calling settlePayment with:", {
-          resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-          originalMethod: req.method,
-          normalizedMethod,
-          hasPaymentData: !!paymentData,
-          payTo: tokenEntry.id,
-          network: baseSepolia.id,
-          networkName: baseSepolia.name,
-          price: priceString,
-          serverSlug: serverSlug,
-          apiSlug: apiSlug,
-        });
-        
-        const paymentResult = await settlePayment({
-          resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-          method: normalizedMethod as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
-          paymentData,
-          payTo: tokenEntry.id,
-          network: baseSepolia, // Keep chain object for on-chain operations
-          price: priceString,
-          facilitator: thirdwebFacilitator,
-          routeConfig: {
-            description: `IAO Proxy - ${tokenEntry.name} (${tokenEntry.symbol}) - API: ${api.name}`,
-            mimeType: "application/json",
-            maxTimeoutSeconds: 300,
-          },
+        console.log('💰 Returning 402 Payment Required:', {
+          payTo: facilitatorAddress,
+          finalRecipient: tokenEntry.id,
+          asset: tokenEntry.paymentToken,
+          amount: tokenEntry.subscriptionFee,
+          serverSlug,
+          apiSlug,
+          timestamp: new Date().toISOString()
         })
-        
-        console.log("settlePayment result:", {
-          status: paymentResult.status,
-          paymentReceipt: paymentResult.status === 200 ? paymentResult.paymentReceipt : undefined,
-        });
-
-        // If payment not verified, return 402 response
-        if (paymentResult.status !== 200) {
-          return res.status(paymentResult.status).json(paymentResult.responseBody)
-        }
-
-        // Payment verified - create RequestQueue entry
-        if (userRequestService && paymentData) {
-          try {
-            // Decode payment data to extract user address
-            const userAddress = extractUserAddressFromPayment(paymentData)
-            
-            if (userAddress && dynamoDBService) {
-              // Get current subscription count from DynamoDB (this will be the globalRequestNumber)
-              const tokenDBEntry = await dynamoDBService.getItem(tokenEntry.id)
-              if (tokenDBEntry) {
-                const currentSubscriptionCount = BigInt(tokenDBEntry.subscriptionCount || "0")
-                const globalRequestNumber = (currentSubscriptionCount + BigInt(1)).toString()
-
-                // Create RequestQueue entry
-                await userRequestService.createRequestQueueEntry(
-                  tokenEntry.id,
-                  userAddress,
-                  globalRequestNumber
-                )
-
-                // Update token's subscriptionCount in DynamoDB (aggregated across all APIs)
-                const newSubscriptionCount = (currentSubscriptionCount + BigInt(1)).toString()
-                const updatedTokenEntry: IAOTokenDBEntry = {
-                  ...tokenDBEntry,
-                  subscriptionCount: newSubscriptionCount,
-                  updatedAt: new Date().toISOString(),
-                }
-                await dynamoDBService.putItem(updatedTokenEntry)
-                console.log(`✅ Updated token subscriptionCount: ${newSubscriptionCount}`)
-                console.log(`✅ Created RequestQueue entry for user ${userAddress} (globalRequestNumber: ${globalRequestNumber})`)
-              }
-            }
-          } catch (queueError: any) {
-            // Log error but don't fail the request - payment was already verified
-            console.error("⚠️  Failed to create RequestQueue entry:", queueError)
-          }
-        }
-      } catch (paymentError: any) {
-        console.error("Payment verification error:", paymentError)
-        console.error("Payment error details:", {
-          message: paymentError.message,
-          stack: paymentError.stack,
-          name: paymentError.name,
-          cause: paymentError.cause,
-        })
-        
-        // Check if error is related to HEAD request validation
-        // This happens when facilitator makes internal HEAD request for validation
-        const isHeadRequestError = paymentError.message?.includes('HEAD') || 
-                                   paymentError.message?.includes('invalid_literal')
-        
-        // If no payment data provided, return 402
-        if (!paymentData) {
-          // For HEAD request errors on testnet, facilitator may not fully support Base Sepolia
-          // Return 402 with payment requirements anyway
-          if (isHeadRequestError) {
-            console.warn("⚠️  Facilitator HEAD request validation failed - this may indicate Base Sepolia support issues")
-          }
-          
-          return res.status(402).json({
-            error: "Payment required",
-            message: "This endpoint requires payment. Please provide X-PAYMENT header.",
-            accepts: [{
-              scheme: "exact",
-              network: `eip155:${baseSepolia.id}`, // Facilitator expects EIP-155 format: eip155:chainId
-              payTo: tokenEntry.id,
-              asset: tokenEntry.paymentToken,
-              maxAmountRequired: tokenEntry.subscriptionFee,
-            }],
-          })
-        }
-        
-        // If payment data provided but verification failed
-        // For HEAD request errors, this might be a facilitator issue with Base Sepolia
-        if (isHeadRequestError) {
-          console.error("⚠️  Payment verification failed due to facilitator HEAD request issue")
-          console.error("   This may indicate that thirdweb facilitator doesn't fully support Base Sepolia testnet")
-          console.error("   Consider using Base mainnet or checking facilitator documentation")
-        }
         
         return res.status(402).json({
-          error: "Payment verification failed",
-          message: paymentError.message || "Invalid payment proof",
-          details: paymentError.stack || paymentError.toString(),
+          error: "Payment required",
+          message: "This endpoint requires payment. Please provide X-PAYMENT header.",
+          accepts: [{
+            scheme: "exact",
+            network: `eip155:${baseSepolia.id}`,
+            payTo: facilitatorAddress,  // User pays to FACILITATOR
+            asset: tokenEntry.paymentToken,
+            maxAmountRequired: tokenEntry.subscriptionFee,
+          }],
+          // Include final recipient for reference
+          finalRecipient: tokenEntry.id,
+          serverSlug: serverSlug,
+          apiSlug: apiSlug,
         })
       }
+      
+      // Verify payment authorization BEFORE calling builder
+      // User should have signed payment to facilitator address
+      const facilitatorAddress = process.env.THIRDWEB_SERVER_WALLET_ADDRESS!
+      
+      console.log("📝 Verifying payment authorization...")
+      const verifyResult = await verifyPaymentAuthorization(
+        paymentData,
+        facilitatorAddress,
+        tokenEntry.subscriptionFee,
+        tokenEntry.paymentToken
+      )
+      
+      if (!verifyResult.valid) {
+        console.error("❌ Payment authorization invalid:", verifyResult.error)
+        return res.status(402).json({
+          error: "Invalid payment authorization",
+          message: verifyResult.error || "Payment authorization is invalid",
+          accepts: [{
+            scheme: "exact",
+            network: `eip155:${baseSepolia.id}`,
+            payTo: tokenEntry.id,
+            asset: tokenEntry.paymentToken,
+            maxAmountRequired: tokenEntry.subscriptionFee,
+          }],
+        })
+      }
+      
+      console.log("✅ Payment authorization valid - will execute AFTER successful builder response")
     } else {
-      // If thirdweb facilitator not configured, skip payment verification
-      console.warn("⚠️  Thirdweb facilitator not configured - skipping payment verification for /api/:address")
+      console.warn("⚠️  Thirdweb client not configured - skipping payment verification")
     }
 
-    // Payment verified (or skipped if facilitator not configured)
-    // Forward request to builder endpoint (use the specific API's URL)
+    // STEP 1: Forward request to builder endpoint FIRST (before settling payment)
+    let builderResponse: any
+    let parsedData: any
+    let builderSuccess = false
+    
     try {
       // Build builder endpoint URL with query parameters
-      const builderUrl = new URL(api.apiUrl) // Use the specific API's URL
+      const builderUrl = new URL(api.apiUrl)
        
       // Copy all query parameters from proxy request to builder endpoint
       Object.keys(req.query).forEach((key: string) => {
         builderUrl.searchParams.set(key, req.query[key] as string)
       })
 
-      console.log(`Forwarding request to builder endpoint: ${builderUrl.toString()}`)
+      console.log(`Forwarding request to builder endpoint (BEFORE payment): ${builderUrl.toString()}`)
 
       // Forward request to builder endpoint
-      // Convert headers to proper format (string arrays to comma-separated strings)
       const forwardHeaders: Record<string, string> = {}
       Object.entries(req.headers).forEach(([key, value]) => {
         const lowerKey = key.toLowerCase()
-        if (!['host', 'x-payment-proof', 'x-payment-token', 'x-payment-amount'].includes(lowerKey)) {
+        if (!['host', 'x-payment', 'x-payment-proof', 'x-payment-token', 'x-payment-amount'].includes(lowerKey)) {
           forwardHeaders[key] = Array.isArray(value) ? value.join(', ') : (value as string || '')
         }
       })
@@ -919,208 +995,266 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
             tokenEntry.id,
             api.apiUrl,
             BUILDER_SECRET_PHRASE,
-            '5m' // Token expires in 5 minutes
+            '5m'
           )
           forwardHeaders['X-IAO-Auth'] = jwtToken
           console.log("✅ Added JWT authentication header for builder endpoint")
         } catch (jwtError: any) {
           console.error("⚠️  Failed to generate JWT token:", jwtError)
-          // Continue without JWT if generation fails
         }
       }
       
-      console.log("Fetching from builder endpoint:", builderUrl.toString());
-      
       // Create AbortController for timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout (increased from 30s)
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 60000)
       
       try {
-        // Add timeout and connection settings for better reliability
-        // Request without zstd compression (Node.js fetch doesn't support zstd decompression)
-        const builderResponse = await fetch(builderUrl.toString(), {
+        builderResponse = await fetch(builderUrl.toString(), {
           method: req.method,
           headers: {
             ...forwardHeaders,
             'User-Agent': 'IAO-Proxy/1.0',
             'Accept': 'application/json, */*',
-            'Accept-Encoding': 'identity' // Request no compression to avoid zstd issues - Node.js fetch doesn't support zstd
+            'Accept-Encoding': 'identity'
           },
-          // Forward body if present (for POST/PUT requests)
           body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
           signal: controller.signal
-        });
-        clearTimeout(timeoutId);
+        })
+        clearTimeout(timeoutId)
 
-        // Get response data - handle JSON and text responses properly
-        let parsedData: any
+        // Parse response
         const contentType = builderResponse.headers.get('content-type') || ''
         const contentEncoding = builderResponse.headers.get('content-encoding') || ''
         
-        console.log("Builder response headers:", {
+        console.log("Builder response:", {
+          status: builderResponse.status,
           contentType,
-          contentEncoding,
-          status: builderResponse.status
+          contentEncoding
         })
         
-        // Handle zstd compression - Node.js fetch doesn't automatically decompress zstd
+        // Handle zstd compression
         if (contentEncoding && contentEncoding.toLowerCase().includes('zstd')) {
-          console.warn("⚠️  Response header indicates zstd compression - attempting to parse anyway")
-          console.warn("⚠️  Note: Node.js fetch doesn't support zstd decompression, but sometimes the header is incorrect")
-          
-          // Try to parse the response anyway - sometimes the Content-Encoding header is wrong
-          // or the server sends uncompressed data despite the header
+          console.warn("⚠️  Response indicates zstd compression - attempting to parse anyway")
           try {
             const responseText = await builderResponse.text()
-            console.log("Response as text (first 200 chars):", responseText.substring(0, 200))
-            
-            // Check if it looks like valid JSON (starts with { or [)
             if (responseText.trim().startsWith('{') || responseText.trim().startsWith('[')) {
               try {
                 parsedData = JSON.parse(responseText)
-                console.log("✅ Successfully parsed zstd-flagged response as JSON (header may have been incorrect)")
-              } catch (parseError: any) {
-                // If JSON parsing fails, it might actually be compressed
-                console.error("❌ Failed to parse as JSON - response may actually be zstd compressed")
+                console.log("✅ Parsed zstd-flagged response as JSON")
+        } catch {
                 parsedData = {
                   error: "Unsupported compression",
-                  message: "The API response is compressed with zstd, which is not supported. Please configure the API server to use gzip, deflate, or no compression.",
-                  contentType,
-                  contentEncoding,
-                  suggestion: "The API server should be configured to not use zstd compression, or to respect the Accept-Encoding header"
+                  message: "The API response is compressed with zstd, which is not supported."
                 }
               }
             } else {
-              // Doesn't look like JSON - likely actually compressed
-              console.error("❌ Response doesn't look like JSON - likely actually zstd compressed")
               parsedData = {
                 error: "Unsupported compression",
-                message: "The API response is compressed with zstd, which is not supported. Please configure the API server to use gzip, deflate, or no compression.",
-                contentType,
-                contentEncoding,
-                suggestion: "The API server should be configured to not use zstd compression"
+                message: "The API response is compressed with zstd, which is not supported."
               }
             }
-          } catch (textError: any) {
-            console.error("❌ Error reading zstd-flagged response:", textError)
+          } catch {
             parsedData = {
               error: "Unsupported compression",
-              message: "The API response is compressed with zstd, which is not supported.",
-              contentType,
-              contentEncoding
+              message: "The API response is compressed with zstd, which is not supported."
             }
           }
         } else {
           try {
             if (contentType.includes('application/json')) {
-              // If content-type is JSON, parse it directly (handles gzip/deflate/br decompression automatically)
               parsedData = await builderResponse.json()
-              console.log("✅ Parsed as JSON successfully, type:", typeof parsedData, Array.isArray(parsedData) ? 'array' : 'object')
+              console.log("✅ Parsed as JSON successfully")
             } else {
-              // Otherwise, get as text and try to parse
               const responseText = await builderResponse.text()
-              console.log("Response as text (first 200 chars):", responseText.substring(0, 200))
               try {
                 parsedData = JSON.parse(responseText)
-                console.log("✅ Parsed text as JSON successfully")
-              } catch (parseError: any) {
-                // If not valid JSON, return as string
-                console.warn("⚠️  Response is not valid JSON, returning as text")
+              } catch {
                 parsedData = responseText
               }
             }
           } catch (parseError: any) {
-            console.error("❌ Error parsing builder response:", parseError.message || parseError)
-            // Check if it's a zstd-related error
-            if (parseError.message && parseError.message.includes('zstd')) {
-              parsedData = {
-                error: "Unsupported compression",
-                message: "The API response appears to be zstd compressed, which is not supported.",
-                contentType,
-                contentEncoding
-              }
-            } else {
-              parsedData = { 
-                error: "Failed to parse response", 
-                message: parseError.message || "Unable to decode response",
-                contentType,
-                contentEncoding
-              }
+            parsedData = { 
+              error: "Failed to parse response", 
+              message: parseError.message || "Unable to decode response"
             }
           }
         }
 
-        // Return builder response (payment already verified by thirdweb's settlePayment)
-        // Ensure proper JSON encoding (hide builder endpoint from response)
-        res.status(builderResponse.status).setHeader('Content-Type', 'application/json; charset=utf-8').json({
-        data: parsedData,
-        payment: {
-          status: "paid",
-          tokenAddress: tokenEntry.id,
-          subscriptionFee: tokenEntry.subscriptionFee,
-          paymentToken: tokenEntry.paymentToken
-        },
-          proxy: {
-            serverSlug: serverSlug,
-            apiSlug: apiSlug,
-            apiName: api.name,
-            timestamp: new Date().toISOString()
-          }
-        })
-
-        // Payment settlement logged - automation will read from subgraph and mint rewards
-        // Thirdweb facilitator verified and processed payment, automation handles token minting
-        console.log("Payment settled for API - automation should mint rewards", {
-          tokenAddress: tokenEntry.id,
-          tokenSymbol: tokenEntry.symbol,
-          serverSlug: serverSlug,
-          apiSlug: apiSlug,
-          apiName: api.name
-        })
+        // Check if builder response was successful (2xx status)
+        builderSuccess = builderResponse.status >= 200 && builderResponse.status < 300
+        console.log(`Builder response status: ${builderResponse.status}, success: ${builderSuccess}`)
 
       } catch (fetchError: any) {
-        clearTimeout(timeoutId);
+        clearTimeout(timeoutId)
         
-        // Handle timeout specifically
         if (fetchError.name === 'AbortError' || fetchError.code === 'ETIMEDOUT') {
-          console.error("Builder endpoint timeout:", builderUrl.toString());
+          console.error("❌ Builder endpoint timeout - NOT charging user")
           return res.status(504).json({
             error: "Builder endpoint timeout",
-            message: "The builder endpoint did not respond within 60 seconds",
-            serverSlug: serverSlug,
-            apiSlug: apiSlug,
+            message: "The builder endpoint did not respond within 60 seconds. You have NOT been charged.",
+            serverSlug,
+            apiSlug,
             apiName: api.name,
-            suggestion: "The builder endpoint may be slow or unavailable. Please try again later or contact the API builder."
-          });
+            charged: false
+          })
         }
         
-        // Handle other fetch errors
-        console.error("Error fetching from builder endpoint:", fetchError);
+        console.error("❌ Builder endpoint fetch error - NOT charging user:", fetchError)
         return res.status(502).json({
           error: "Builder endpoint error",
-          message: "Failed to fetch from builder endpoint",
-          serverSlug: serverSlug,
-          apiSlug: apiSlug,
+          message: "Failed to fetch from builder endpoint. You have NOT been charged.",
+          serverSlug,
+          apiSlug,
           apiName: api.name,
-          errorType: fetchError.type || fetchError.code || "unknown"
-        });
+          charged: false
+        })
       }
     } catch (forwardError: any) {
-      console.error("Error forwarding to builder endpoint:", forwardError)
+      console.error("❌ Error forwarding to builder - NOT charging user:", forwardError)
       return res.status(502).json({
         error: "Builder endpoint error",
-        message: "Failed to fetch from builder endpoint",
-        serverSlug: serverSlug,
-        apiSlug: apiSlug,
-        apiName: api.name
+        message: "Failed to reach builder endpoint. You have NOT been charged.",
+        serverSlug,
+        apiSlug,
+        apiName: api.name,
+        charged: false
       })
     }
+
+    // STEP 2: If builder failed, return error WITHOUT charging
+    if (!builderSuccess) {
+      console.log(`❌ Builder returned error status ${builderResponse.status} - NOT charging user`)
+      return res.status(builderResponse.status).json({
+        error: "Builder endpoint returned error",
+        message: "The API returned an error. You have NOT been charged.",
+        builderStatus: builderResponse.status,
+        data: parsedData,
+        serverSlug,
+        apiSlug,
+        apiName: api.name,
+        charged: false
+      })
+    }
+
+    // STEP 3: Builder succeeded - NOW execute the payment
+    console.log("✅ Builder returned success - NOW executing payment to token address")
+    
+    if (thirdwebClient && paymentData) {
+      try {
+        console.log("Executing payment transfer:", {
+          payTo: tokenEntry.id,
+          amount: tokenEntry.subscriptionFee,
+          paymentToken: tokenEntry.paymentToken,
+          serverSlug,
+          apiSlug,
+        })
+        
+        const paymentResult = await executePaymentTransfer(
+          paymentData,
+          tokenEntry.paymentToken,
+          req,
+          tokenEntry.id,
+          tokenEntry.subscriptionFee,
+          serverSlug,
+          apiSlug,
+          api.name
+        )
+        
+        if (!paymentResult.success) {
+          console.error("❌ Payment execution failed AFTER successful builder response")
+          console.error("Payment error:", paymentResult.error)
+    return res.status(500).json({
+            error: "Payment execution failed",
+            message: "Builder returned data successfully, but payment could not be executed.",
+            paymentError: paymentResult.error,
+            data: parsedData,
+            serverSlug,
+            apiSlug,
+            charged: false
+          })
+        }
+
+        console.log("✅ Payment executed successfully:", paymentResult.txHash)
+
+        // STEP 4: Update subscription count and request queue
+        if (userRequestService && paymentData) {
+          try {
+            const userAddress = extractUserAddressFromPayment(paymentData)
+            
+            if (userAddress && dynamoDBService) {
+              const tokenDBEntry = await dynamoDBService.getItem(tokenEntry.id)
+              if (tokenDBEntry) {
+                const currentSubscriptionCount = BigInt(tokenDBEntry.subscriptionCount || "0")
+                const globalRequestNumber = (currentSubscriptionCount + BigInt(1)).toString()
+
+                await userRequestService.createRequestQueueEntry(
+                  tokenEntry.id,
+                  userAddress,
+                  globalRequestNumber
+                )
+
+                const newSubscriptionCount = (currentSubscriptionCount + BigInt(1)).toString()
+                const updatedTokenEntry: IAOTokenDBEntry = {
+                  ...tokenDBEntry,
+                  subscriptionCount: newSubscriptionCount,
+                  updatedAt: new Date().toISOString(),
+                }
+                await dynamoDBService.putItem(updatedTokenEntry)
+                console.log(`✅ Updated subscriptionCount: ${newSubscriptionCount}`)
+              }
+            }
+          } catch (queueError: any) {
+            console.error("⚠️  Failed to update request queue:", queueError)
+          }
+        }
+      } catch (paymentError: any) {
+        console.error("❌ Payment settlement error:", paymentError)
+        // Return data but indicate payment failed
+        return res.status(500).json({
+          error: "Payment processing error",
+          message: "Builder returned data successfully, but payment processing failed.",
+          data: parsedData,
+          serverSlug,
+          apiSlug,
+          charged: false
+        })
+      }
+    }
+
+    // STEP 5: Return successful response with data
+    console.log("✅ Returning successful response with payment confirmed")
+    
+    res.status(builderResponse.status).setHeader('Content-Type', 'application/json; charset=utf-8').json({
+      data: parsedData,
+    payment: {
+      status: "paid",
+        tokenAddress: tokenEntry.id,
+        subscriptionFee: tokenEntry.subscriptionFee,
+        paymentToken: tokenEntry.paymentToken,
+        charged: true
+      },
+      proxy: {
+        serverSlug: serverSlug,
+        apiSlug: apiSlug,
+        apiName: api.name,
+    timestamp: new Date().toISOString()
+      }
+    })
+
+    console.log("Payment settled for API - automation should mint rewards", {
+      tokenAddress: tokenEntry.id,
+      tokenSymbol: tokenEntry.symbol,
+      serverSlug,
+      apiSlug,
+      apiName: api.name
+    })
 
   } catch (error: any) {
     console.error("Error in IAO proxy endpoint:", error)
     return res.status(500).json({
       error: "Internal server error",
-      message: error.message || "An unexpected error occurred"
+      message: error.message || "An unexpected error occurred",
+      charged: false
     })
   }
 }

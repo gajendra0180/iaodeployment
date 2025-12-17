@@ -18,12 +18,10 @@
     "@types/jsonwebtoken": "^9.0.10",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
-    "ethers": "^6.15.0",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.3",
     "node-fetch": "^3.3.2",
-    "thirdweb": "^5.114.1",
-    "x402-express": "^0.7.1"
+    "thirdweb": "^5.114.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
