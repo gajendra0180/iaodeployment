@@ -116,10 +116,9 @@ interface IAOTokenEntry {
   builder: string           // Builder address
   name: string              // Token/server name
   symbol: string            // Token symbol
-  subscriptionFee: string   // Fee amount in smallest unit of payment token
   subscriptionCount?: string // Total usage count (aggregated across all APIs)
   paymentToken: string      // Payment token address (e.g., USDC)
-  apis: ApiEntry[]          // Array of registered APIs
+  apis: ApiEntry[]          // Array of registered APIs (each with own fee)
 }
 
 /**
@@ -143,7 +142,6 @@ async function getIAOTokenEntry(tokenAddress: string): Promise<IAOTokenEntry | n
         builder: dbEntry.builder,
         name: dbEntry.name,
         symbol: dbEntry.symbol,
-        subscriptionFee: dbEntry.subscriptionFee,
         subscriptionCount: dbEntry.subscriptionCount,
         paymentToken: dbEntry.paymentToken,
         apis: dbEntry.apis || [],
@@ -177,7 +175,6 @@ async function getIAOTokenEntryBySlug(serverSlug: string): Promise<IAOTokenEntry
         builder: dbEntry.builder,
         name: dbEntry.name,
         symbol: dbEntry.symbol,
-        subscriptionFee: dbEntry.subscriptionFee,
         subscriptionCount: dbEntry.subscriptionCount,
         paymentToken: dbEntry.paymentToken,
         apis: dbEntry.apis || [],
@@ -331,7 +328,7 @@ async function executePaymentTransfer(
   paymentToken: string,
   req: any,
   tokenAddress: string,
-  subscriptionFee: string,
+  fee: string, // API-specific fee
   serverSlug: string,
   apiSlug: string,
   apiName: string
@@ -352,9 +349,9 @@ async function executePaymentTransfer(
     }
     
     // Calculate price string
-    const subscriptionFeeWei = BigInt(subscriptionFee)
-    const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
-    const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
+    const feeWei = BigInt(fee)
+    const feeUSD = Number(feeWei) / 1e6
+    const priceString = `$${feeUSD.toFixed(2)}`
     
     console.log('💳 Calling settlePayment AFTER builder success:', {
       resourceUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
@@ -416,46 +413,201 @@ async function executePaymentTransfer(
 /**
  * POST /api/register - Register a new IAO token with one or more API endpoints
  * 
- * This endpoint accepts token creation data and stores it in DynamoDB.
- * The frontend should call this after successfully creating a token on-chain.
- * A builder can register multiple APIs at once, all linked to the same token.
+ * This endpoint can be called in two modes:
+ * 1. VALIDATION MODE (tokenAddress missing): Validates data BEFORE transaction signing
+ * 2. REGISTRATION MODE (tokenAddress present): Stores token in DynamoDB AFTER transaction
  * 
- * Request body:
+ * Request body (validation mode):
+ * {
+ *   slug: string (server slug, e.g., "magpie"),
+ *   apis: [{ slug: string, apiUrl: string, fee: string }],
+ *   builder: string (0x...),
+ * }
+ * 
+ * Request body (registration mode):
  * {
  *   tokenAddress: string (0x...),
  *   slug: string (server slug, e.g., "magpie"),
  *   name: string,
  *   symbol: string,
- *   apis: [{ slug: string, name: string, apiUrl: string, description: string }],
+ *   apis: [{ slug: string, name: string, apiUrl: string, description: string, fee: string }],
  *   builder: string (0x...),
  *   paymentToken: string (0x...),
- *   subscriptionFee: string (BigInt as string),
  * }
  */
 app.post('/api/register', async (req, res) => {
   try {
     const {
-      tokenAddress,
-      slug,       // Server slug (e.g., "magpie")
+      tokenAddress,  // Optional - if missing, just validate
+      serverSlug,     // Server slug (e.g., "magpie") - comes as "serverSlug" from frontend
+      slug = serverSlug, // Backwards compatibility: accept both "slug" and "serverSlug"
       name,
       symbol,
-      apis,       // Array of APIs with slugs
+      apis,       // Array of APIs with individual fees
       builder,
       paymentToken,
-      subscriptionFee,
     } = req.body
 
-    // Validate required fields
-    if (!tokenAddress || !slug || !name || !symbol || !builder || !paymentToken || !subscriptionFee) {
+    // VALIDATION MODE: If tokenAddress is missing, just validate and return
+    if (!tokenAddress) {
+      // Validate required fields for validation mode
+      if (!slug || !apis || !builder) {
+        return res.status(400).json({
+          error: "Missing required fields",
+          message: "slug (or serverSlug), apis, and builder are required for validation"
+        })
+      }
+
+      // Validate server slug format
+      const finalServerSlug = slug.toLowerCase()
+      if (!isValidSlug(finalServerSlug)) {
+        return res.status(400).json({
+          error: "Invalid server slug",
+          message: "Server slug must be 3-30 characters, lowercase alphanumeric with hyphens"
+        })
+      }
+
+      // Validate at least one API is provided
+      if (!Array.isArray(apis) || apis.length === 0) {
+        return res.status(400).json({
+          error: "Missing API endpoints",
+          message: "'apis' array with at least one API is required"
+        })
+      }
+
+      // Validate address format
+      const addressRegex = /^0x[a-fA-F0-9]{40}$/i
+      if (!addressRegex.test(builder)) {
+        return res.status(400).json({
+          error: "Invalid address format",
+          message: "builder must be a valid Ethereum address"
+        })
+      }
+
+      // Check if DynamoDB is configured
+      if (!dynamoDBService) {
+        return res.status(503).json({
+          error: "DynamoDB not configured",
+          message: "DynamoDB service is not available"
+        })
+      }
+
+      // Check if server slug already exists
+      const existingBySlug = await dynamoDBService.getItemBySlug(finalServerSlug)
+      if (existingBySlug) {
+        return res.status(409).json({
+          error: "Server slug already taken",
+          message: `The slug "${finalServerSlug}" is already registered. Please choose a different slug.`
+        })
+      }
+
+      // Check if builder already has a server registered
+      const existingTokens = await dynamoDBService.scanItemsByBuilder(builder)
+      if (existingTokens.length > 0) {
+        const existingToken = existingTokens[0]
+        return res.status(409).json({
+          error: "You already have an active server",
+          message: `This address already has a registered server. Use /api/add-api to add more APIs.`,
+          existingServerSlug: existingToken.slug,
+          existingServerName: existingToken.name,
+        })
+      }
+
+      // Validate API fields and check for duplicates
+      const apiUrls: string[] = []
+      const apiSlugs = new Set<string>()
+
+      for (let i = 0; i < apis.length; i++) {
+        const api = apis[i]
+        
+        // Validate required API fields
+        if (!api.slug || !api.apiUrl || !api.fee) {
+          return res.status(400).json({
+            error: "Invalid API entry",
+            message: `API at index ${i} is missing required fields (slug, apiUrl, fee)`
+          })
+        }
+
+        // Validate fee is a positive number
+        try {
+          const fee = BigInt(api.fee)
+          if (fee <= 0n) {
+            return res.status(400).json({
+              error: "Invalid API fee",
+              message: `API at index ${i} must have a positive fee`
+            })
+          }
+        } catch {
+          return res.status(400).json({
+            error: "Invalid fee format",
+            message: `API at index ${i} has invalid fee format`
+          })
+        }
+
+        // Validate API slug format
+        const apiSlug = api.slug.toLowerCase()
+        if (!isValidSlug(apiSlug)) {
+          return res.status(400).json({
+            error: "Invalid API slug",
+            message: `API at index ${i} has invalid slug. Must be 3-30 characters, lowercase alphanumeric with hyphens.`
+          })
+        }
+
+        // Check for duplicate API slugs within this registration
+        if (apiSlugs.has(apiSlug)) {
+          return res.status(400).json({
+            error: "Duplicate API slug",
+            message: `API slug "${apiSlug}" is used more than once. Each API must have a unique slug.`
+          })
+        }
+        apiSlugs.add(apiSlug)
+
+        // Validate URL format
+        try {
+          new URL(api.apiUrl)
+          apiUrls.push(api.apiUrl)
+        } catch {
+          return res.status(400).json({
+            error: "Invalid API URL",
+            message: `API at index ${i} has invalid URL: ${api.apiUrl}`
+          })
+        }
+      }
+
+      // Check if any API URLs are already registered globally
+      const duplicateApis = await dynamoDBService.checkApiUrlsDuplicate(apiUrls)
+      if (duplicateApis.length > 0) {
+        return res.status(409).json({
+          error: "Duplicate API URL(s)",
+          message: `The following API endpoint(s) are already registered: ${duplicateApis.map(d => d.url).join(', ')}`,
+          duplicates: duplicateApis.map(d => ({
+            url: d.url,
+            registeredOn: d.serverSlug
+          }))
+        })
+      }
+
+      // All validation checks passed
+      return res.status(200).json({
+        success: true,
+        message: "All validation checks passed. You can proceed with token creation.",
+        serverSlug: finalServerSlug,
+        apiCount: apis.length
+      })
+    }
+
+    // REGISTRATION MODE: tokenAddress is present, proceed with full registration
+    // Validate required fields for registration mode
+    if (!slug || !name || !symbol || !builder || !paymentToken) {
       return res.status(400).json({
         error: "Missing required fields",
-        message: "tokenAddress, slug, name, symbol, builder, paymentToken, and subscriptionFee are required"
+        message: "slug (or serverSlug), name, symbol, builder, and paymentToken are required"
       })
     }
 
     // Validate server slug format
-    const serverSlug = slug.toLowerCase()
-    if (!isValidSlug(serverSlug)) {
+    const finalServerSlug = slug.toLowerCase()
+    if (!isValidSlug(finalServerSlug)) {
       return res.status(400).json({
         error: "Invalid server slug",
         message: "Server slug must be 3-30 characters, lowercase alphanumeric with hyphens, starting and ending with alphanumeric"
@@ -488,11 +640,11 @@ app.post('/api/register', async (req, res) => {
     }
 
     // Check if server slug already exists
-    const existingBySlug = await dynamoDBService.getItemBySlug(serverSlug)
+    const existingBySlug = await dynamoDBService.getItemBySlug(finalServerSlug)
     if (existingBySlug) {
       return res.status(409).json({
         error: "Server slug already taken",
-        message: `The slug "${serverSlug}" is already registered. Please choose a different slug.`
+        message: `The slug "${finalServerSlug}" is already registered. Please choose a different slug.`
       })
     }
 
@@ -521,6 +673,20 @@ app.post('/api/register', async (req, res) => {
       })
     }
 
+    // Check if any API URLs are already registered globally
+    const apiUrls = apis.map((api: any) => api.apiUrl).filter((url: string) => url)
+    const duplicateApis = await dynamoDBService.checkApiUrlsDuplicate(apiUrls)
+    if (duplicateApis.length > 0) {
+      return res.status(409).json({
+        error: "Duplicate API URL(s)",
+        message: `The following API endpoint(s) are already registered: ${duplicateApis.map(d => d.url).join(', ')}`,
+        duplicates: duplicateApis.map(d => ({
+          url: d.url,
+          registeredOn: d.serverSlug
+        }))
+      })
+    }
+
     // Build apis array with validation
     const apiEntries: ApiEntry[] = []
     const apiSlugs = new Set<string>()
@@ -530,10 +696,19 @@ app.post('/api/register', async (req, res) => {
       const api = apis[i]
       
       // Validate required API fields
-      if (!api.slug || !api.name || !api.apiUrl || !api.description) {
+      if (!api.slug || !api.name || !api.apiUrl || !api.description || !api.fee) {
         return res.status(400).json({
           error: "Invalid API entry",
-          message: `API at index ${i} is missing required fields (slug, name, apiUrl, description)`
+          message: `API at index ${i} is missing required fields (slug, name, apiUrl, description, fee)`
+        })
+      }
+
+      // Validate fee is a positive number
+      const fee = BigInt(api.fee)
+      if (fee <= 0n) {
+        return res.status(400).json({
+          error: "Invalid API fee",
+          message: `API at index ${i} must have a positive fee`
         })
       }
 
@@ -571,6 +746,7 @@ app.post('/api/register', async (req, res) => {
         name: api.name,
         apiUrl: api.apiUrl,
         description: api.description,
+        fee: api.fee,
         createdAt: now,
       })
     }
@@ -578,13 +754,12 @@ app.post('/api/register', async (req, res) => {
     // Create token entry
     const tokenEntry: IAOTokenDBEntry = {
       id: tokenAddress.toLowerCase(),
-      slug: serverSlug,
+      slug: finalServerSlug,
       name,
       symbol,
       apis: apiEntries,
       builder: builder.toLowerCase(),
       paymentToken: paymentToken.toLowerCase(),
-      subscriptionFee: subscriptionFee.toString(),
       subscriptionCount: "0",
       refundCount: "0",
       fulfilledCount: "0",
@@ -595,7 +770,7 @@ app.post('/api/register', async (req, res) => {
     // Store in DynamoDB
     await dynamoDBService.putItem(tokenEntry)
 
-    console.log(`✅ Registered new server: ${serverSlug} (${name}/${symbol}) with ${apiEntries.length} API(s)`)
+    console.log(`✅ Registered new server: ${finalServerSlug} (${name}/${symbol}) with ${apiEntries.length} API(s)`)
 
     return res.status(201).json({
       success: true,
@@ -608,7 +783,6 @@ app.post('/api/register', async (req, res) => {
         apis: sanitizeApisForPublic(apiEntries), // Hide apiUrl from response
         builder: tokenEntry.builder,
         paymentToken: tokenEntry.paymentToken,
-        subscriptionFee: tokenEntry.subscriptionFee,
       }
     })
   } catch (error: any) {
@@ -644,14 +818,31 @@ app.post('/api/add-api', async (req, res) => {
       name,
       apiUrl,
       description,
+      fee,
       builder,
     } = req.body
 
     // Validate required fields
-    if (!serverSlug || !slug || !name || !apiUrl || !description || !builder) {
+    if (!serverSlug || !slug || !name || !apiUrl || !description || !fee || !builder) {
       return res.status(400).json({
         error: "Missing required fields",
-        message: "serverSlug, slug, name, apiUrl, description, and builder are required"
+        message: "serverSlug, slug, name, apiUrl, description, fee, and builder are required"
+      })
+    }
+
+    // Validate fee is a positive number
+    try {
+      const feeAmount = BigInt(fee)
+      if (feeAmount <= 0n) {
+        return res.status(400).json({
+          error: "Invalid fee",
+          message: "Fee must be a positive number"
+        })
+      }
+    } catch {
+      return res.status(400).json({
+        error: "Invalid fee format",
+        message: "Fee must be a valid number string"
       })
     }
 
@@ -716,13 +907,23 @@ app.post('/api/add-api', async (req, res) => {
       })
     }
 
+    // Check if API URL already exists globally
+    const existingApiUrl = await dynamoDBService.apiUrlExists(apiUrl)
+    if (existingApiUrl.exists) {
+      return res.status(409).json({
+        error: "Duplicate API URL",
+        message: `This API endpoint is already registered on server "${existingApiUrl.serverSlug}".`
+      })
+    }
+
     // Add new API
     const newApi = await dynamoDBService.addApiToToken(
       existingToken.id,
       apiSlug,
       name,
       apiUrl,
-      description
+      description,
+      fee
     )
 
     if (!newApi) {
@@ -779,7 +980,6 @@ app.get('/api/server/:slug', async (req, res) => {
         symbol: tokenEntry.symbol,
         builder: tokenEntry.builder,
         paymentToken: tokenEntry.paymentToken,
-        subscriptionFee: tokenEntry.subscriptionFee,
         subscriptionCount: tokenEntry.subscriptionCount || "0",
         apis: tokenEntry.apis ? sanitizeApisForPublic(tokenEntry.apis) : [],
         apiCount: tokenEntry.apis?.length || 0,
@@ -816,7 +1016,6 @@ app.get('/api/servers', async (req, res) => {
       symbol: token.symbol,
       builder: token.builder,
       paymentToken: token.paymentToken,
-      subscriptionFee: token.subscriptionFee,
       subscriptionCount: token.subscriptionCount,
       apis: token.apis ? sanitizeApisForPublic(token.apis) : [],
       apiCount: token.apis?.length || 0,
@@ -893,7 +1092,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     const paymentData = req.headers['x-payment'] as string | undefined
     
     // Convert subscription fee from wei to USD string (assuming 6 decimals for USDC)
-    const subscriptionFeeWei = BigInt(tokenEntry.subscriptionFee)
+    const subscriptionFeeWei = BigInt(api.fee)
     const subscriptionFeeUSD = Number(subscriptionFeeWei) / 1e6
     const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
 
@@ -908,7 +1107,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
           payTo: facilitatorAddress,
           finalRecipient: tokenEntry.id,
           asset: tokenEntry.paymentToken,
-          amount: tokenEntry.subscriptionFee,
+          amount: api.fee,
           serverSlug,
           apiSlug,
           timestamp: new Date().toISOString()
@@ -922,7 +1121,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
             network: `eip155:${baseSepolia.id}`,
             payTo: facilitatorAddress,  // User pays to FACILITATOR
             asset: tokenEntry.paymentToken,
-            maxAmountRequired: tokenEntry.subscriptionFee,
+            maxAmountRequired: api.fee,
           }],
           // Include final recipient for reference
           finalRecipient: tokenEntry.id,
@@ -939,7 +1138,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
       const verifyResult = await verifyPaymentAuthorization(
         paymentData,
         facilitatorAddress,
-        tokenEntry.subscriptionFee,
+        api.fee, // Use API-specific fee
         tokenEntry.paymentToken
       )
       
@@ -953,7 +1152,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
             network: `eip155:${baseSepolia.id}`,
             payTo: tokenEntry.id,
             asset: tokenEntry.paymentToken,
-            maxAmountRequired: tokenEntry.subscriptionFee,
+            maxAmountRequired: api.fee,
           }],
         })
       }
@@ -1143,7 +1342,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
       try {
         console.log("Executing payment transfer:", {
           payTo: tokenEntry.id,
-          amount: tokenEntry.subscriptionFee,
+          amount: api.fee, // Use API-specific fee
           paymentToken: tokenEntry.paymentToken,
           serverSlug,
           apiSlug,
@@ -1154,7 +1353,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
           tokenEntry.paymentToken,
           req,
           tokenEntry.id,
-          tokenEntry.subscriptionFee,
+          api.fee, // Use API-specific fee
           serverSlug,
           apiSlug,
           api.name
@@ -1190,7 +1389,8 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
                 await userRequestService.createRequestQueueEntry(
                   tokenEntry.id,
                   userAddress,
-                  globalRequestNumber
+                  globalRequestNumber,
+                  api.fee // Pass API-specific fee
                 )
 
                 const newSubscriptionCount = (currentSubscriptionCount + BigInt(1)).toString()
@@ -1229,7 +1429,6 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     payment: {
       status: "paid",
         tokenAddress: tokenEntry.id,
-        subscriptionFee: tokenEntry.subscriptionFee,
         paymentToken: tokenEntry.paymentToken,
         charged: true
       },

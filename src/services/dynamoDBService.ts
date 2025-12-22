@@ -74,13 +74,14 @@ export interface ApiEntry {
   name: string;         // API name/title
   apiUrl: string;       // Builder's API endpoint URL (hidden from public)
   description: string;  // Required description
+  fee: string;          // Fee in payment token smallest unit (e.g., "10000" = $0.01 USDC with 6 decimals)
   createdAt: string;    // ISO timestamp when this API was added
 }
 
 /**
  * IAO Token database entry (represents a server/builder)
  * One token can have multiple APIs (1:N relationship)
- * All APIs under a token share the same subscription fee and payment token
+ * Each API has its own fee (per-API pricing)
  */
 export interface IAOTokenDBEntry {
   id: string;                    // Token address (lowercase) - Primary Key
@@ -89,11 +90,10 @@ export interface IAOTokenDBEntry {
   symbol: string;                // Token symbol
   builder: string;               // Builder address (lowercase)
   paymentToken: string;          // Payment token address (lowercase)
-  subscriptionFee: string;       // BigInt as string - same for all APIs
   subscriptionCount: string;     // BigInt as string, default "0" - aggregated across all APIs
   refundCount: string;           // BigInt as string, default "0"
   fulfilledCount: string;        // BigInt as string, default "0"
-  apis: ApiEntry[];              // Array of registered APIs
+  apis: ApiEntry[];              // Array of registered APIs (each with own fee)
   createdAt: string;             // ISO timestamp
   updatedAt: string;             // ISO timestamp
 }
@@ -221,10 +221,66 @@ class DynamoDBService {
   }
 
   /**
+   * Check if an API URL already exists globally across all servers
+   * Returns the server slug and token address if found
+   */
+  async apiUrlExists(apiUrl: string): Promise<{ exists: boolean; serverSlug?: string; tokenAddress?: string }> {
+    try {
+      const tokens = await this.scanAllItems();
+      for (const token of tokens) {
+        if (token.apis) {
+          const matchingApi = token.apis.find(api => api.apiUrl === apiUrl);
+          if (matchingApi) {
+            return {
+              exists: true,
+              serverSlug: token.slug,
+              tokenAddress: token.id
+            };
+          }
+        }
+      }
+      return { exists: false };
+    } catch (err) {
+      console.error(`❌ DynamoDB apiUrlExists error:`, err);
+      return { exists: false };
+    }
+  }
+
+  /**
+   * Check if multiple API URLs exist globally
+   * Returns array of duplicates found
+   */
+  async checkApiUrlsDuplicate(apiUrls: string[]): Promise<{ url: string; serverSlug: string; tokenAddress: string }[]> {
+    try {
+      const tokens = await this.scanAllItems();
+      const duplicates: { url: string; serverSlug: string; tokenAddress: string }[] = [];
+      
+      for (const token of tokens) {
+        if (token.apis) {
+          for (const api of token.apis) {
+            if (apiUrls.includes(api.apiUrl)) {
+              duplicates.push({
+                url: api.apiUrl,
+                serverSlug: token.slug,
+                tokenAddress: token.id
+              });
+            }
+          }
+        }
+      }
+      
+      return duplicates;
+    } catch (err) {
+      console.error(`❌ DynamoDB checkApiUrlsDuplicate error:`, err);
+      return [];
+    }
+  }
+
+  /**
    * Add a new API to an existing token
    * The new API will be assigned the next available index
    */
-  async addApiToToken(tokenAddress: string, apiSlug: string, apiName: string, apiUrl: string, description: string): Promise<ApiEntry | null> {
+  async addApiToToken(tokenAddress: string, apiSlug: string, apiName: string, apiUrl: string, description: string, fee: string): Promise<ApiEntry | null> {
     const token = await this.getItem(tokenAddress);
     if (!token) {
       console.error(`❌ Token ${tokenAddress} not found`);
@@ -250,6 +306,7 @@ class DynamoDBService {
       name: apiName,
       apiUrl: apiUrl,
       description: description,
+      fee: fee,
       createdAt: new Date().toISOString(),
     };
 

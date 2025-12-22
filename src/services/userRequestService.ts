@@ -38,6 +38,7 @@ export interface RequestQueueDBEntry {
   from: string; // User address (lowercase)
   userRequestNumber: string; // BigInt as string
   globalRequestNumber: string; // BigInt as string
+  fee: string; // Fee paid by user in payment token wei (e.g., "10000" for $0.01)
   createdAt: string; // ISO timestamp
 }
 
@@ -99,7 +100,8 @@ class UserRequestService {
   async createRequestQueueEntry(
     iaoToken: string,
     from: string,
-    globalRequestNumber: string
+    globalRequestNumber: string,
+    fee: string
   ): Promise<RequestQueueDBEntry> {
     try {
       // Get or create user request
@@ -128,6 +130,7 @@ class UserRequestService {
         from: from.toLowerCase(),
         userRequestNumber,
         globalRequestNumber,
+        fee,
         createdAt: new Date().toISOString(),
       };
 
@@ -136,7 +139,7 @@ class UserRequestService {
         Item: requestQueueEntry,
       }));
 
-      console.log(`✅ Created RequestQueue entry: ${queueId} (globalRequestNumber: ${globalRequestNumber})`);
+      console.log(`✅ Created RequestQueue entry: ${queueId} (globalRequestNumber: ${globalRequestNumber}, fee: ${fee})`);
       return requestQueueEntry;
     } catch (err) {
       console.error(`❌ DynamoDB createRequestQueueEntry fail:`, err);
