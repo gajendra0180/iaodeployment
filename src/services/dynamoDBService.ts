@@ -93,6 +93,7 @@ export interface IAOTokenDBEntry {
   subscriptionCount: string;     // BigInt as string, default "0" - aggregated across all APIs
   refundCount: string;           // BigInt as string, default "0"
   fulfilledCount: string;        // BigInt as string, default "0"
+  tags?: string[];               // Array of category tags (e.g., ["crypto", "trading"])
   apis: ApiEntry[];              // Array of registered APIs (each with own fee)
   createdAt: string;             // ISO timestamp
   updatedAt: string;             // ISO timestamp

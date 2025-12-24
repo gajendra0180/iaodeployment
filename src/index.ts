@@ -6,13 +6,29 @@ import cors from 'cors'
 import { facilitator as thirdwebFacilitatorFn, settlePayment } from 'thirdweb/x402'
 import { createThirdwebClient } from 'thirdweb'
 import { baseSepolia } from 'thirdweb/chains'
+import { getContract, readContract } from 'thirdweb'
 import fetch from 'node-fetch'
+import fs from 'fs'
 import { DynamoDBService, IAOTokenDBEntry, ApiEntry } from './services/dynamoDBService.js'
 import { UserRequestService } from './services/userRequestService.js'
+import { MetricsService } from './services/metricsService.js'
 import { generateBuilderJWT } from './utils/jwtAuth.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
+// Load IAOToken ABI
+let IAOTokenABI: any[] = []
+try {
+  const abiPath = path.join(__dirname, '../../tools/shared-data/abis/hyperpie/IAOToken.json')
+  if (fs.existsSync(abiPath)) {
+    IAOTokenABI = JSON.parse(fs.readFileSync(abiPath, 'utf-8'))
+  } else {
+    console.warn('⚠️  IAOToken ABI not found at:', abiPath)
+  }
+} catch (error) {
+  console.warn('⚠️  Failed to load IAOToken ABI:', error)
+}
 
 // Load environment variables
 config()
@@ -86,9 +102,20 @@ try {
   console.log("   Set USER_REQUEST_TABLE_NAME and REQUEST_QUEUE_TABLE_NAME environment variables if needed")
 }
 
+// Metrics Service initialization
+const METRICS_TABLE_NAME = "apix-iao-metrics"
+let metricsService: MetricsService | null = null
+try {
+  metricsService = new MetricsService(DYNAMODB_REGION, METRICS_TABLE_NAME)
+  console.log(`✅ Metrics service initialized (Table: ${METRICS_TABLE_NAME})`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Metrics service:", error)
+  console.log("   Set METRICS_TABLE_NAME environment variable if needed")
+}
+
 
 /**
- * Extract user address from payment data (X-PAYMENT header)
+ * Extract user address from payment data (PAYMENT-SIGNATURE header - x402 V2)
  * The payment data is base64-encoded JSON containing the authorization
  */
 function extractUserAddressFromPayment(paymentData: string): string | null {
@@ -118,6 +145,7 @@ interface IAOTokenEntry {
   symbol: string            // Token symbol
   subscriptionCount?: string // Total usage count (aggregated across all APIs)
   paymentToken: string      // Payment token address (e.g., USDC)
+  tags?: string[]           // Array of category tags
   apis: ApiEntry[]          // Array of registered APIs (each with own fee)
 }
 
@@ -144,6 +172,7 @@ async function getIAOTokenEntry(tokenAddress: string): Promise<IAOTokenEntry | n
         symbol: dbEntry.symbol,
         subscriptionCount: dbEntry.subscriptionCount,
         paymentToken: dbEntry.paymentToken,
+        tags: dbEntry.tags,
         apis: dbEntry.apis || [],
       }
       console.log(`✅ Found IAO token in DynamoDB: ${addressLower} (slug: ${dbEntry.slug}, ${dbEntry.apis?.length || 0} APIs)`)
@@ -177,6 +206,7 @@ async function getIAOTokenEntryBySlug(serverSlug: string): Promise<IAOTokenEntry
         symbol: dbEntry.symbol,
         subscriptionCount: dbEntry.subscriptionCount,
         paymentToken: dbEntry.paymentToken,
+        tags: dbEntry.tags,
         apis: dbEntry.apis || [],
       }
       console.log(`✅ Found IAO token by slug: ${serverSlug} (${dbEntry.apis?.length || 0} APIs)`)
@@ -265,6 +295,53 @@ if (process.env.THIRDWEB_SECRET_KEY && process.env.THIRDWEB_SERVER_WALLET_ADDRES
  */
 function isValidSlug(slug: string): boolean {
   return /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/.test(slug)
+}
+
+/**
+ * Valid category tags for API servers
+ */
+const VALID_CATEGORY_TAGS = [
+  'crypto',
+  'blockchain',
+  'ai',
+  'ml',
+  'trading',
+  'data',
+  'analytics',
+  'infrastructure',
+  'social',
+  'media',
+  'finance',
+  'gaming',
+] as const
+
+type CategoryTag = typeof VALID_CATEGORY_TAGS[number]
+
+/**
+ * Validate category tags
+ */
+function validateTags(tags: any): string[] | null {
+  if (!tags) return []
+  if (!Array.isArray(tags)) return null
+  
+  const normalizedTags: string[] = []
+  for (const tag of tags) {
+    if (typeof tag !== 'string') return null
+    const normalizedTag = tag.toLowerCase().trim()
+    if (!normalizedTag) continue
+    
+    // Check if tag is valid
+    if (!VALID_CATEGORY_TAGS.includes(normalizedTag as CategoryTag)) {
+      return null // Invalid tag found
+    }
+    
+    // Avoid duplicates
+    if (!normalizedTags.includes(normalizedTag)) {
+      normalizedTags.push(normalizedTag)
+    }
+  }
+  
+  return normalizedTags.length > 0 ? normalizedTags : []
 }
 
 /**
@@ -446,6 +523,7 @@ app.post('/api/register', async (req, res) => {
       apis,       // Array of APIs with individual fees
       builder,
       paymentToken,
+      tags,       // Array of category tags (optional)
     } = req.body
 
     // VALIDATION MODE: If tokenAddress is missing, just validate and return
@@ -587,6 +665,17 @@ app.post('/api/register', async (req, res) => {
         })
       }
 
+      // Validate tags if provided
+      if (tags !== undefined) {
+        const validatedTags = validateTags(tags)
+        if (validatedTags === null) {
+          return res.status(400).json({
+            error: "Invalid tags",
+            message: `Tags must be an array of valid category strings. Valid categories: ${VALID_CATEGORY_TAGS.join(', ')}`
+          })
+        }
+      }
+
       // All validation checks passed
       return res.status(200).json({
         success: true,
@@ -603,6 +692,19 @@ app.post('/api/register', async (req, res) => {
         error: "Missing required fields",
         message: "slug (or serverSlug), name, symbol, builder, and paymentToken are required"
       })
+    }
+
+    // Validate tags if provided
+    let validatedTags: string[] = []
+    if (tags !== undefined) {
+      const tagsResult = validateTags(tags)
+      if (tagsResult === null) {
+        return res.status(400).json({
+          error: "Invalid tags",
+          message: `Tags must be an array of valid category strings. Valid categories: ${VALID_CATEGORY_TAGS.join(', ')}`
+        })
+      }
+      validatedTags = tagsResult
     }
 
     // Validate server slug format
@@ -763,6 +865,7 @@ app.post('/api/register', async (req, res) => {
       subscriptionCount: "0",
       refundCount: "0",
       fulfilledCount: "0",
+      tags: validatedTags.length > 0 ? validatedTags : undefined,
       createdAt: now,
       updatedAt: now,
     }
@@ -981,6 +1084,7 @@ app.get('/api/server/:slug', async (req, res) => {
         builder: tokenEntry.builder,
         paymentToken: tokenEntry.paymentToken,
         subscriptionCount: tokenEntry.subscriptionCount || "0",
+        tags: tokenEntry.tags || [],
         apis: tokenEntry.apis ? sanitizeApisForPublic(tokenEntry.apis) : [],
         apiCount: tokenEntry.apis?.length || 0,
       }
@@ -1017,6 +1121,7 @@ app.get('/api/servers', async (req, res) => {
       builder: token.builder,
       paymentToken: token.paymentToken,
       subscriptionCount: token.subscriptionCount,
+      tags: token.tags || [],
       apis: token.apis ? sanitizeApisForPublic(token.apis) : [],
       apiCount: token.apis?.length || 0,
       createdAt: token.createdAt,
@@ -1032,6 +1137,194 @@ app.get('/api/servers', async (req, res) => {
     return res.status(500).json({
       error: "Internal server error",
       message: error.message || "Failed to fetch servers"
+    })
+  }
+})
+
+/**
+ * GET /api/metrics/:serverSlug - Get metrics for a server
+ * Returns aggregated metrics including API calls, revenue, latency, and contract metrics
+ */
+app.get('/api/metrics/:serverSlug', async (req, res) => {
+  const serverSlug = req.params.serverSlug.toLowerCase()
+
+  try {
+    const tokenEntry = await getIAOTokenEntryBySlug(serverSlug)
+    if (!tokenEntry) {
+      return res.status(404).json({
+        error: "Server not found",
+        message: `No server registered with slug "${serverSlug}"`
+      })
+    }
+
+    // Get server metrics from DynamoDB
+    let serverMetrics = null
+    if (metricsService) {
+      serverMetrics = await metricsService.getServerMetrics(tokenEntry.id)
+    }
+
+    // Get contract metrics (bonding progress, token distribution)
+    let contractMetrics = null
+    try {
+      if (thirdwebClient && IAOTokenABI.length > 0) {
+        const tokenContract = getContract({
+          client: thirdwebClient,
+          chain: baseSepolia,
+          address: tokenEntry.id,
+          abi: IAOTokenABI,
+        })
+
+        const [graduationThreshold, totalTokensDistributed, totalFeesCollected, liquidityDeployed] = await Promise.all([
+          readContract({ contract: tokenContract, method: "graduationThreshold", params: [] }),
+          readContract({ contract: tokenContract, method: "totalTokensDistributed", params: [] }),
+          readContract({ contract: tokenContract, method: "totalFeesCollected", params: [] }),
+          readContract({ contract: tokenContract, method: "liquidityDeployed", params: [] }),
+        ])
+
+        const graduationThresholdBigInt = BigInt(graduationThreshold.toString())
+        const totalTokensDistributedBigInt = BigInt(totalTokensDistributed.toString())
+        const totalFeesCollectedBigInt = BigInt(totalFeesCollected.toString())
+
+        const bondingProgress = graduationThresholdBigInt > 0n
+          ? Number((totalTokensDistributedBigInt * 10000n) / graduationThresholdBigInt) / 100
+          : 0
+
+        const isGraduated = liquidityDeployed === true
+
+        // Generate Uniswap link if graduated (Base Sepolia)
+        let uniswapLink: string | undefined
+        if (isGraduated) {
+          // Uniswap V4 pools are identified by PoolId, not a traditional address
+          // For Base Sepolia, link to token page which should show pool info
+          // TODO: Once Uniswap V4 frontend supports direct pool links, update this
+          // Pool parameters: fee=10000 (1%), tickSpacing=200, hook=lpGuardHook
+          // For now, link to token page which should display pool information
+          uniswapLink = `https://app.uniswap.org/explore/tokens/base-sepolia/${tokenEntry.id}`
+          
+          // Alternative: Link to swap page with token pair pre-selected
+          // uniswapLink = `https://app.uniswap.org/swap?chain=base-sepolia&inputCurrency=${tokenEntry.paymentToken}&outputCurrency=${tokenEntry.id}`
+        }
+
+        contractMetrics = {
+          tokenAddress: tokenEntry.id,
+          graduationThreshold: graduationThresholdBigInt.toString(),
+          totalTokensDistributed: totalTokensDistributedBigInt.toString(),
+          totalFeesCollected: totalFeesCollectedBigInt.toString(),
+          bondingProgress: Math.min(bondingProgress, 100), // Cap at 100%
+          isGraduated,
+          uniswapLink,
+        }
+      } else {
+        // Fallback if thirdweb client or ABI not available
+        contractMetrics = {
+          tokenAddress: tokenEntry.id,
+          graduationThreshold: "0",
+          totalTokensDistributed: "0",
+          totalFeesCollected: "0",
+          bondingProgress: 0,
+          isGraduated: false,
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch contract metrics:", error)
+      // Return fallback on error
+      contractMetrics = {
+        tokenAddress: tokenEntry.id,
+        graduationThreshold: "0",
+        totalTokensDistributed: "0",
+        totalFeesCollected: "0",
+        bondingProgress: 0,
+        isGraduated: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      serverSlug,
+      metrics: {
+        server: serverMetrics,
+        contract: contractMetrics,
+      },
+    })
+  } catch (error: any) {
+    console.error("Error fetching metrics:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch metrics"
+    })
+  }
+})
+
+/**
+ * GET /api/metrics/:serverSlug/:apiSlug - Get metrics for a specific API
+ */
+app.get('/api/metrics/:serverSlug/:apiSlug', async (req, res) => {
+  const serverSlug = req.params.serverSlug.toLowerCase()
+  const apiSlug = req.params.apiSlug.toLowerCase()
+
+  try {
+    const tokenEntry = await getIAOTokenEntryBySlug(serverSlug)
+    if (!tokenEntry) {
+      return res.status(404).json({
+        error: "Server not found",
+        message: `No server registered with slug "${serverSlug}"`
+      })
+    }
+
+    const api = getApiFromTokenBySlug(tokenEntry, apiSlug)
+    if (!api) {
+      return res.status(404).json({
+        error: "API not found",
+        message: `No API found with slug "${apiSlug}" in server "${serverSlug}"`
+      })
+    }
+
+    // Get API metrics (using last 100 calls)
+    let apiMetrics = null
+    let successRate = 0
+    if (metricsService) {
+      const rawMetrics = await metricsService.getApiMetrics(tokenEntry.id, apiSlug)
+      if (rawMetrics) {
+        // Calculate metrics from last 100 calls if available
+        let recentMetrics;
+        if (rawMetrics.recentCalls && rawMetrics.recentCalls.length > 0) {
+          recentMetrics = metricsService.calculateRecentMetrics(rawMetrics.recentCalls)
+          successRate = recentMetrics.successRate
+        } else {
+          // Fallback to aggregated counts
+          const success = BigInt(rawMetrics.successCount)
+          const failure = BigInt(rawMetrics.failureCount)
+          const totalAttempts = success + failure
+          successRate = totalAttempts > 0n
+            ? (Number(success) / Number(totalAttempts)) * 100
+            : 0
+        }
+        
+        // Add calculated success rate and recent metrics info
+        apiMetrics = {
+          ...rawMetrics,
+          successRate,
+          // Include info about whether metrics are from recent calls
+          metricsFromLast100Calls: rawMetrics.recentCalls && rawMetrics.recentCalls.length > 0,
+          recentCallCount: rawMetrics.recentCalls?.length || 0,
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      serverSlug,
+      apiSlug,
+      metrics: {
+        api: apiMetrics,
+      },
+    })
+  } catch (error: any) {
+    console.error("Error fetching API metrics:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch API metrics"
     })
   }
 })
@@ -1065,9 +1358,12 @@ app.head('/api/:serverSlug/:apiSlug', async (req, res) => {
  * 4. If builder fails, return error WITHOUT charging
  */
 async function handleApiProxyRequest(req: any, res: any, serverSlug: string, apiSlug: string) {
+  let tokenEntry: IAOTokenEntry | null = null
+  let requestStartTime = Date.now()
+  
   try {
     // Query DynamoDB for server by slug
-    const tokenEntry = await getIAOTokenEntryBySlug(serverSlug)
+    tokenEntry = await getIAOTokenEntryBySlug(serverSlug)
 
     if (!tokenEntry) {
       return res.status(404).json({
@@ -1088,8 +1384,8 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
 
     console.log(`📡 Proxy request for server ${serverSlug}, API ${apiSlug}: ${api.name}`)
 
-    // Get payment data from header (validate presence, but don't settle yet)
-    const paymentData = req.headers['x-payment'] as string | undefined
+    // Get payment data from header (x402 V2: PAYMENT-SIGNATURE, fallback to X-PAYMENT for V1 compatibility)
+    const paymentData = (req.headers['payment-signature'] || req.headers['x-payment']) as string | undefined
     
     // Convert subscription fee from wei to USD string (assuming 6 decimals for USDC)
     const subscriptionFeeWei = BigInt(api.fee)
@@ -1115,10 +1411,11 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         
         return res.status(402).json({
           error: "Payment required",
-          message: "This endpoint requires payment. Please provide X-PAYMENT header.",
+          message: "This endpoint requires payment. Please provide PAYMENT-SIGNATURE header (x402 V2).",
+          x402Version: 2,
           accepts: [{
             scheme: "exact",
-            network: `eip155:${baseSepolia.id}`,
+            network: `eip155:${baseSepolia.id}`, // CAIP-2 format (V2)
             payTo: facilitatorAddress,  // User pays to FACILITATOR
             asset: tokenEntry.paymentToken,
             maxAmountRequired: api.fee,
@@ -1147,9 +1444,10 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         return res.status(402).json({
           error: "Invalid payment authorization",
           message: verifyResult.error || "Payment authorization is invalid",
+          x402Version: 2,
           accepts: [{
             scheme: "exact",
-            network: `eip155:${baseSepolia.id}`,
+            network: `eip155:${baseSepolia.id}`, // CAIP-2 format (V2)
             payTo: tokenEntry.id,
             asset: tokenEntry.paymentToken,
             maxAmountRequired: api.fee,
@@ -1166,6 +1464,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     let builderResponse: any
     let parsedData: any
     let builderSuccess = false
+    requestStartTime = Date.now() // Update latency tracking for builder call
     
     try {
       // Build builder endpoint URL with query parameters
@@ -1182,7 +1481,8 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
       const forwardHeaders: Record<string, string> = {}
       Object.entries(req.headers).forEach(([key, value]) => {
         const lowerKey = key.toLowerCase()
-        if (!['host', 'x-payment', 'x-payment-proof', 'x-payment-token', 'x-payment-amount'].includes(lowerKey)) {
+        // Filter out payment headers (V1 and V2)
+        if (!['host', 'x-payment', 'payment-signature', 'x-payment-proof', 'x-payment-token', 'x-payment-amount'].includes(lowerKey)) {
           forwardHeaders[key] = Array.isArray(value) ? value.join(', ') : (value as string || '')
         }
       })
@@ -1286,11 +1586,28 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
       } catch (fetchError: any) {
         clearTimeout(timeoutId)
         
+        const latencyMs = Date.now() - requestStartTime
+        
         if (fetchError.name === 'AbortError' || fetchError.code === 'ETIMEDOUT') {
           console.error("❌ Builder endpoint timeout - NOT charging user")
+          
+          // Record failure metrics for timeout
+          if (metricsService) {
+            metricsService.recordApiCall(
+              tokenEntry.id,
+              apiSlug,
+              "0", // No fee charged on failure
+              false, // failure
+              latencyMs
+            ).catch(err => {
+              console.error("⚠️  Failed to record metrics:", err)
+            })
+          }
+          
           return res.status(504).json({
             error: "Builder endpoint timeout",
             message: "The builder endpoint did not respond within 60 seconds. You have NOT been charged.",
+            x402Version: 2,
             serverSlug,
             apiSlug,
             apiName: api.name,
@@ -1299,9 +1616,24 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         }
         
         console.error("❌ Builder endpoint fetch error - NOT charging user:", fetchError)
+        
+        // Record failure metrics for fetch error
+        if (metricsService) {
+          metricsService.recordApiCall(
+            tokenEntry.id,
+            apiSlug,
+            "0", // No fee charged on failure
+            false, // failure
+            latencyMs
+          ).catch(err => {
+            console.error("⚠️  Failed to record metrics:", err)
+          })
+        }
+        
         return res.status(502).json({
           error: "Builder endpoint error",
           message: "Failed to fetch from builder endpoint. You have NOT been charged.",
+          x402Version: 2,
           serverSlug,
           apiSlug,
           apiName: api.name,
@@ -1310,9 +1642,26 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
       }
     } catch (forwardError: any) {
       console.error("❌ Error forwarding to builder - NOT charging user:", forwardError)
+      
+      const latencyMs = Date.now() - requestStartTime
+      
+      // Record failure metrics for forward error
+      if (metricsService) {
+        metricsService.recordApiCall(
+          tokenEntry.id,
+          apiSlug,
+          "0", // No fee charged on failure
+          false, // failure
+          latencyMs
+        ).catch(err => {
+          console.error("⚠️  Failed to record metrics:", err)
+        })
+      }
+      
       return res.status(502).json({
         error: "Builder endpoint error",
         message: "Failed to reach builder endpoint. You have NOT been charged.",
+        x402Version: 2,
         serverSlug,
         apiSlug,
         apiName: api.name,
@@ -1323,9 +1672,25 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     // STEP 2: If builder failed, return error WITHOUT charging
     if (!builderSuccess) {
       console.log(`❌ Builder returned error status ${builderResponse.status} - NOT charging user`)
+      
+      // Record failure metrics (no revenue, but track failure)
+      if (metricsService) {
+        const latencyMs = Date.now() - requestStartTime
+        metricsService.recordApiCall(
+          tokenEntry.id,
+          apiSlug,
+          "0", // No fee charged on failure
+          false, // failure
+          latencyMs
+        ).catch(err => {
+          console.error("⚠️  Failed to record metrics:", err)
+        })
+      }
+      
       return res.status(builderResponse.status).json({
         error: "Builder endpoint returned error",
         message: "The API returned an error. You have NOT been charged.",
+        x402Version: 2,
         builderStatus: builderResponse.status,
         data: parsedData,
         serverSlug,
@@ -1365,6 +1730,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     return res.status(500).json({
             error: "Payment execution failed",
             message: "Builder returned data successfully, but payment could not be executed.",
+            x402Version: 2,
             paymentError: paymentResult.error,
             data: parsedData,
             serverSlug,
@@ -1374,6 +1740,20 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         }
 
         console.log("✅ Payment executed successfully:", paymentResult.txHash)
+
+        // Record metrics (latency, success, revenue)
+        if (metricsService) {
+          const latencyMs = Date.now() - requestStartTime
+          metricsService.recordApiCall(
+            tokenEntry.id,
+            apiSlug,
+            api.fee,
+            true, // success
+            latencyMs
+          ).catch(err => {
+            console.error("⚠️  Failed to record metrics:", err)
+          })
+        }
 
         // STEP 4: Update subscription count and request queue
         if (userRequestService && paymentData) {
@@ -1413,6 +1793,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         return res.status(500).json({
           error: "Payment processing error",
           message: "Builder returned data successfully, but payment processing failed.",
+          x402Version: 2,
           data: parsedData,
           serverSlug,
           apiSlug,
@@ -1424,10 +1805,14 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     // STEP 5: Return successful response with data
     console.log("✅ Returning successful response with payment confirmed")
     
+    // Set x402 V2 response header
+    res.setHeader('PAYMENT-RESPONSE', 'paid')
+    
     res.status(builderResponse.status).setHeader('Content-Type', 'application/json; charset=utf-8').json({
       data: parsedData,
-    payment: {
-      status: "paid",
+      x402Version: 2,
+      payment: {
+        status: "paid",
         tokenAddress: tokenEntry.id,
         paymentToken: tokenEntry.paymentToken,
         charged: true
@@ -1436,7 +1821,7 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         serverSlug: serverSlug,
         apiSlug: apiSlug,
         apiName: api.name,
-    timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString()
       }
     })
 
@@ -1450,6 +1835,21 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
 
   } catch (error: any) {
     console.error("Error in IAO proxy endpoint:", error)
+    
+    // Record failure metrics if we have token entry info (error happened during builder call or after)
+    if (tokenEntry && metricsService) {
+      const latencyMs = Date.now() - requestStartTime
+      metricsService.recordApiCall(
+        tokenEntry.id,
+        apiSlug,
+        "0", // No fee charged on error
+        false, // failure
+        latencyMs
+      ).catch(err => {
+        console.error("⚠️  Failed to record metrics:", err)
+      })
+    }
+    
     return res.status(500).json({
       error: "Internal server error",
       message: error.message || "An unexpected error occurred",
