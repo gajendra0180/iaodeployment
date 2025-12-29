@@ -20,7 +20,7 @@ const __dirname = path.dirname(__filename)
 // Load IAOToken ABI
 let IAOTokenABI: any[] = []
 try {
-  const abiPath = path.join(__dirname, '../../tools/shared-data/abis/hyperpie/IAOToken.json')
+  const abiPath = path.join(__dirname, '../abis/IAOToken.json')
   if (fs.existsSync(abiPath)) {
     IAOTokenABI = JSON.parse(fs.readFileSync(abiPath, 'utf-8'))
   } else {
@@ -33,7 +33,7 @@ try {
 // Load IAOTokenFactory ABI
 let IAOTokenFactoryABI: any[] = []
 try {
-  const factoryAbiPath = path.join(__dirname, '../../tools/shared-data/abis/hyperpie/IAOTokenFactory.json')
+  const factoryAbiPath = path.join(__dirname, '../abis/IAOTokenFactory.json')
   if (fs.existsSync(factoryAbiPath)) {
     IAOTokenFactoryABI = JSON.parse(fs.readFileSync(factoryAbiPath, 'utf-8'))
   } else {
