@@ -20,27 +20,21 @@ const __dirname = path.dirname(__filename)
 // Load IAOToken ABI
 let IAOTokenABI: any[] = []
 try {
-  const abiPath = path.join(__dirname, '../abis/IAOToken.json')
-  if (fs.existsSync(abiPath)) {
-    IAOTokenABI = JSON.parse(fs.readFileSync(abiPath, 'utf-8'))
-  } else {
-    console.warn('⚠️  IAOToken ABI not found at:', abiPath)
-  }
+  const abiPath = path.join(process.cwd(), 'abis/IAOToken.json')
+  IAOTokenABI = JSON.parse(fs.readFileSync(abiPath, 'utf-8'))
+  console.log('✅ IAOToken ABI loaded')
 } catch (error) {
-  console.warn('⚠️  Failed to load IAOToken ABI:', error)
+  console.error('❌ Failed to load IAOToken ABI:', error)
 }
 
 // Load IAOTokenFactory ABI
 let IAOTokenFactoryABI: any[] = []
 try {
-  const factoryAbiPath = path.join(__dirname, '../abis/IAOTokenFactory.json')
-  if (fs.existsSync(factoryAbiPath)) {
-    IAOTokenFactoryABI = JSON.parse(fs.readFileSync(factoryAbiPath, 'utf-8'))
-  } else {
-    console.warn('⚠️  IAOTokenFactory ABI not found at:', factoryAbiPath)
-  }
+  const factoryAbiPath = path.join(process.cwd(), 'abis/IAOTokenFactory.json')
+  IAOTokenFactoryABI = JSON.parse(fs.readFileSync(factoryAbiPath, 'utf-8'))
+  console.log('✅ IAOTokenFactory ABI loaded')
 } catch (error) {
-  console.warn('⚠️  Failed to load IAOTokenFactory ABI:', error)
+  console.error('❌ Failed to load IAOTokenFactory ABI:', error)
 }
 
 // IAO Token Factory address (from constants or env)
