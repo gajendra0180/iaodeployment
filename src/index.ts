@@ -30,6 +30,22 @@ try {
   console.warn('⚠️  Failed to load IAOToken ABI:', error)
 }
 
+// Load IAOTokenFactory ABI
+let IAOTokenFactoryABI: any[] = []
+try {
+  const factoryAbiPath = path.join(__dirname, '../../tools/shared-data/abis/hyperpie/IAOTokenFactory.json')
+  if (fs.existsSync(factoryAbiPath)) {
+    IAOTokenFactoryABI = JSON.parse(fs.readFileSync(factoryAbiPath, 'utf-8'))
+  } else {
+    console.warn('⚠️  IAOTokenFactory ABI not found at:', factoryAbiPath)
+  }
+} catch (error) {
+  console.warn('⚠️  Failed to load IAOTokenFactory ABI:', error)
+}
+
+// IAO Token Factory address (from constants or env)
+const IAO_FACTORY_ADDRESS = "0x5a40F7f30b25D07aB1C06dEB7400554Bc20f8ad4";
+
 // Load environment variables
 config()
 
@@ -650,6 +666,42 @@ app.post('/api/register', async (req, res) => {
             message: `API at index ${i} has invalid URL: ${api.apiUrl}`
           })
         }
+
+        // Validate API endpoint returns 200 status code
+        try {
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+          
+          const response = await fetch(api.apiUrl, {
+            method: 'GET',
+            headers: {
+              'User-Agent': 'IAO-Proxy/1.0',
+              'Accept': 'application/json, */*',
+            },
+            signal: controller.signal,
+          })
+          
+          clearTimeout(timeoutId)
+          
+          if (response.status !== 200) {
+            return res.status(400).json({
+              error: "API endpoint validation failed",
+              message: `API at index ${i} (${api.apiUrl}) returned status code ${response.status} instead of 200. Please ensure your API endpoint is accessible and returns a 200 status code.`
+            })
+          }
+        } catch (fetchError: any) {
+          if (fetchError.name === 'AbortError') {
+            return res.status(400).json({
+              error: "API endpoint timeout",
+              message: `API at index ${i} (${api.apiUrl}) did not respond within 10 seconds. Please ensure your API endpoint is accessible.`
+            })
+          }
+          
+          return res.status(400).json({
+            error: "API endpoint validation failed",
+            message: `API at index ${i} (${api.apiUrl}) is not accessible: ${fetchError.message || 'Connection failed'}. Please ensure your API endpoint is publicly accessible and returns a 200 status code.`
+          })
+        }
       }
 
       // Check if any API URLs are already registered globally
@@ -842,6 +894,42 @@ app.post('/api/register', async (req, res) => {
         })
       }
 
+      // Validate API endpoint returns 200 status code (only in registration mode)
+      try {
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+        
+        const response = await fetch(api.apiUrl, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'IAO-Proxy/1.0',
+            'Accept': 'application/json, */*',
+          },
+          signal: controller.signal,
+        })
+        
+        clearTimeout(timeoutId)
+        
+        if (response.status !== 200) {
+          return res.status(400).json({
+            error: "API endpoint validation failed",
+            message: `API at index ${i} (${api.apiUrl}) returned status code ${response.status} instead of 200. Please ensure your API endpoint is accessible and returns a 200 status code.`
+          })
+        }
+      } catch (fetchError: any) {
+        if (fetchError.name === 'AbortError') {
+          return res.status(400).json({
+            error: "API endpoint timeout",
+            message: `API at index ${i} (${api.apiUrl}) did not respond within 10 seconds. Please ensure your API endpoint is accessible.`
+          })
+        }
+        
+        return res.status(400).json({
+          error: "API endpoint validation failed",
+          message: `API at index ${i} (${api.apiUrl}) is not accessible: ${fetchError.message || 'Connection failed'}. Please ensure your API endpoint is publicly accessible and returns a 200 status code.`
+        })
+      }
+
       apiEntries.push({
         index: i,
         slug: apiSlug,
@@ -974,6 +1062,42 @@ app.post('/api/add-api', async (req, res) => {
       return res.status(400).json({
         error: "Invalid API URL",
         message: "apiUrl must be a valid URL"
+      })
+    }
+
+    // Validate API endpoint returns 200 status code
+    try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+      
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'IAO-Proxy/1.0',
+          'Accept': 'application/json, */*',
+        },
+        signal: controller.signal,
+      })
+      
+      clearTimeout(timeoutId)
+      
+      if (response.status !== 200) {
+        return res.status(400).json({
+          error: "API endpoint validation failed",
+          message: `API endpoint (${apiUrl}) returned status code ${response.status} instead of 200. Please ensure your API endpoint is accessible and returns a 200 status code.`
+        })
+      }
+    } catch (fetchError: any) {
+      if (fetchError.name === 'AbortError') {
+        return res.status(400).json({
+          error: "API endpoint timeout",
+          message: `API endpoint (${apiUrl}) did not respond within 10 seconds. Please ensure your API endpoint is accessible.`
+        })
+      }
+      
+      return res.status(400).json({
+        error: "API endpoint validation failed",
+        message: `API endpoint (${apiUrl}) is not accessible: ${fetchError.message || 'Connection failed'}. Please ensure your API endpoint is publicly accessible and returns a 200 status code.`
       })
     }
 
@@ -1165,14 +1289,54 @@ app.get('/api/metrics/:serverSlug', async (req, res) => {
 
     // Get contract metrics (bonding progress, token distribution)
     let contractMetrics = null
+    let paymentTokenPrice: bigint | null = null
+    let paymentTokenDecimals: number | null = null
+    
     try {
-      if (thirdwebClient && IAOTokenABI.length > 0) {
-        const tokenContract = getContract({
-          client: thirdwebClient,
-          chain: baseSepolia,
-          address: tokenEntry.id,
-          abi: IAOTokenABI,
-        })
+      if (!thirdwebClient) {
+        console.warn(`⚠️  Thirdweb client not initialized - cannot fetch contract metrics for ${tokenEntry.id}`)
+        throw new Error("Thirdweb client not initialized")
+      }
+      
+      if (IAOTokenABI.length === 0) {
+        console.warn(`⚠️  IAOToken ABI not loaded - cannot fetch contract metrics for ${tokenEntry.id}`)
+        throw new Error("IAOToken ABI not loaded")
+      }
+      
+      console.log(`📊 Fetching contract metrics for token: ${tokenEntry.id}`)
+      
+      const tokenContract = getContract({
+        client: thirdwebClient,
+        chain: baseSepolia,
+        address: tokenEntry.id,
+        abi: IAOTokenABI,
+      })
+
+        // Also fetch payment token info from factory for token amount calculation
+        if (IAOTokenFactoryABI.length > 0 && IAO_FACTORY_ADDRESS && IAO_FACTORY_ADDRESS.length === 42) {
+          try {
+            const factoryContract = getContract({
+              client: thirdwebClient,
+              chain: baseSepolia,
+              address: IAO_FACTORY_ADDRESS,
+              abi: IAOTokenFactoryABI,
+            })
+            
+            const paymentTokenInfo = await readContract({
+              contract: factoryContract,
+              method: "paymentTokenInfo",
+              params: [tokenEntry.paymentToken],
+            })
+            
+            // paymentTokenInfo returns: [price, paymentToken, paymentTokenDecimals, graduationThreshold, sqrtPriceX96Token0, sqrtPriceX96Token1]
+            if (paymentTokenInfo && Array.isArray(paymentTokenInfo) && paymentTokenInfo.length >= 3) {
+              paymentTokenPrice = BigInt(paymentTokenInfo[0].toString())
+              paymentTokenDecimals = Number(paymentTokenInfo[2].toString())
+            }
+          } catch (factoryError) {
+            console.warn("⚠️  Failed to fetch payment token info from factory:", factoryError)
+          }
+        }
 
         const [graduationThreshold, totalTokensDistributed, totalFeesCollected, liquidityDeployed] = await Promise.all([
           readContract({ contract: tokenContract, method: "graduationThreshold", params: [] }),
@@ -1181,13 +1345,35 @@ app.get('/api/metrics/:serverSlug', async (req, res) => {
           readContract({ contract: tokenContract, method: "liquidityDeployed", params: [] }),
         ])
 
+        console.log(`📊 Contract values for ${tokenEntry.id}:`, {
+          graduationThreshold: graduationThreshold.toString(),
+          totalTokensDistributed: totalTokensDistributed.toString(),
+          totalFeesCollected: totalFeesCollected.toString(),
+          liquidityDeployed: liquidityDeployed.toString(),
+        })
+
         const graduationThresholdBigInt = BigInt(graduationThreshold.toString())
         const totalTokensDistributedBigInt = BigInt(totalTokensDistributed.toString())
         const totalFeesCollectedBigInt = BigInt(totalFeesCollected.toString())
 
-        const bondingProgress = graduationThresholdBigInt > 0n
-          ? Number((totalTokensDistributedBigInt * 10000n) / graduationThresholdBigInt) / 100
-          : 0
+        // Fix: Calculate bonding progress percentage with proper precision
+        // Use floating point division instead of BigInt division to preserve precision for small percentages
+        let bondingProgress = 0
+        if (graduationThresholdBigInt > 0n) {
+          // Convert BigInt to Number for floating point division (within safe integer range)
+          // This allows us to preserve precision for very small percentages
+          const totalDistributedNum = Number(totalTokensDistributedBigInt)
+          const thresholdNum = Number(graduationThresholdBigInt)
+          
+          // Calculate percentage: (totalTokensDistributed / graduationThreshold) * 100
+          // For very large numbers, this may have some precision loss, but provides correct percentage
+          bondingProgress = (totalDistributedNum / thresholdNum) * 100
+          
+          // Ensure valid number (handle NaN/Infinity)
+          if (!isFinite(bondingProgress)) {
+            bondingProgress = 0
+          }
+        }
 
         const isGraduated = liquidityDeployed === true
 
@@ -1213,21 +1399,18 @@ app.get('/api/metrics/:serverSlug', async (req, res) => {
           bondingProgress: Math.min(bondingProgress, 100), // Cap at 100%
           isGraduated,
           uniswapLink,
+          paymentTokenPrice: paymentTokenPrice?.toString() || null,
+          paymentTokenDecimals: paymentTokenDecimals,
         }
-      } else {
-        // Fallback if thirdweb client or ABI not available
-        contractMetrics = {
-          tokenAddress: tokenEntry.id,
-          graduationThreshold: "0",
-          totalTokensDistributed: "0",
-          totalFeesCollected: "0",
-          bondingProgress: 0,
-          isGraduated: false,
-        }
-      }
     } catch (error) {
-      console.error("Failed to fetch contract metrics:", error)
-      // Return fallback on error
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      const errorStack = error instanceof Error ? error.stack : undefined
+      console.error(`❌ Failed to fetch contract metrics for ${tokenEntry.id}:`, errorMessage)
+      if (errorStack) {
+        console.error("Error stack:", errorStack)
+      }
+      
+      // Return fallback on error with detailed error info
       contractMetrics = {
         tokenAddress: tokenEntry.id,
         graduationThreshold: "0",
@@ -1235,9 +1418,32 @@ app.get('/api/metrics/:serverSlug', async (req, res) => {
         totalFeesCollected: "0",
         bondingProgress: 0,
         isGraduated: false,
-        error: error instanceof Error ? error.message : "Unknown error",
+        paymentTokenPrice: null,
+        paymentTokenDecimals: null,
+        error: errorMessage,
       }
     }
+
+    // Calculate token amount per API call for each API
+    const apisWithTokenAmounts = tokenEntry.apis?.map(api => {
+      let tokensPerCall: string | null = null
+      
+      if (paymentTokenPrice && paymentTokenDecimals !== null) {
+        try {
+          const feeBigInt = BigInt(api.fee)
+          // Calculate: (fee * paymentTokenPrice) / (10^paymentTokenDecimals)
+          const tokenAmount = (feeBigInt * paymentTokenPrice) / BigInt(10 ** paymentTokenDecimals)
+          tokensPerCall = tokenAmount.toString()
+        } catch (calcError) {
+          console.warn(`Failed to calculate token amount for API ${api.slug}:`, calcError)
+        }
+      }
+      
+      return {
+        ...api,
+        tokensPerCall,
+      }
+    }) || []
 
     return res.status(200).json({
       success: true,
@@ -1246,6 +1452,7 @@ app.get('/api/metrics/:serverSlug', async (req, res) => {
         server: serverMetrics,
         contract: contractMetrics,
       },
+      apisWithTokenAmounts,
     })
   } catch (error: any) {
     console.error("Error fetching metrics:", error)
