@@ -1260,6 +1260,78 @@ app.get('/api/servers', async (req, res) => {
 })
 
 /**
+ * GET /api/transactions - Get recent transactions across all servers
+ * Returns recent API call transactions sorted by time
+ */
+app.get('/api/transactions', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 20;
+    
+    if (!userRequestService) {
+      return res.status(503).json({
+        error: "Service not available",
+        message: "Transaction service is not configured"
+      });
+    }
+
+    if (!dynamoDBService) {
+      return res.status(503).json({
+        error: "Service not available",
+        message: "Server data service is not configured"
+      });
+    }
+
+    // Get recent transactions
+    const recentTransactions = await userRequestService.getRecentTransactions(limit);
+
+    // Enrich transaction data with server information
+    const enrichedTransactions = await Promise.all(
+      recentTransactions.map(async (tx) => {
+        try {
+          const serverData = await dynamoDBService!.getItem(tx.iaoToken);
+          return {
+            id: tx.id,
+            iaoToken: tx.iaoToken,
+            from: tx.from,
+            globalRequestNumber: tx.globalRequestNumber,
+            fee: tx.fee,
+            createdAt: tx.createdAt,
+            server: serverData ? {
+              slug: serverData.slug,
+              name: serverData.name,
+              symbol: serverData.symbol,
+            } : null,
+          };
+        } catch (error) {
+          console.error(`Error enriching transaction ${tx.id}:`, error);
+          return {
+            id: tx.id,
+            iaoToken: tx.iaoToken,
+            from: tx.from,
+            globalRequestNumber: tx.globalRequestNumber,
+            fee: tx.fee,
+            createdAt: tx.createdAt,
+            server: null,
+          };
+        }
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: enrichedTransactions.length,
+      transactions: enrichedTransactions,
+    });
+  } catch (error: any) {
+    console.error("Error fetching transactions:", error);
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch transactions"
+    });
+  }
+})
+
+/**
  * GET /api/metrics/:serverSlug - Get metrics for a server
  * Returns aggregated metrics including API calls, revenue, latency, and contract metrics
  */

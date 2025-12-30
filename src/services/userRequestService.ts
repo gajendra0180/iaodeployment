@@ -212,6 +212,28 @@ class UserRequestService {
       throw err;
     }
   }
+
+  /**
+   * Get recent transactions (request queue entries) sorted by createdAt descending
+   * @param limit - Maximum number of transactions to return (default: 20)
+   */
+  async getRecentTransactions(limit: number = 20): Promise<RequestQueueDBEntry[]> {
+    try {
+      // Scan all and sort (Note: For production with large datasets, consider using DynamoDB Streams or a GSI with sort key)
+      const allTransactions = await this.scanAllRequestQueue();
+      
+      // Sort by createdAt descending (most recent first)
+      allTransactions.sort((a, b) => {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+
+      // Return limited results
+      return allTransactions.slice(0, limit);
+    } catch (err) {
+      console.error(`❌ Failed to get recent transactions:`, err);
+      throw err;
+    }
+  }
 }
 
 export { UserRequestService };
