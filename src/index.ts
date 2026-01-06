@@ -12,6 +12,11 @@ import fs from 'fs'
 import { DynamoDBService, IAOTokenDBEntry, ApiEntry } from './services/dynamoDBService.js'
 import { UserRequestService } from './services/userRequestService.js'
 import { MetricsService } from './services/metricsService.js'
+import { AgentService, CreateAgentParams } from './services/agentService.js'
+import { ChatSessionService } from './services/chatSessionService.js'
+import { LLMService } from './services/llmService.js'
+import { AgentToolService } from './services/agentToolService.js'
+import { AgentPaymentService } from './services/agentPaymentService.js'
 import { generateBuilderJWT } from './utils/jwtAuth.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -38,7 +43,7 @@ try {
 }
 
 // IAO Token Factory address (from constants or env)
-const IAO_FACTORY_ADDRESS = "0x5a40F7f30b25D07aB1C06dEB7400554Bc20f8ad4";
+const IAO_FACTORY_ADDRESS = "0xF110bA6BBc7cD595842B6b56ab870faC811e41B5";
 
 // Load environment variables
 config()
@@ -87,7 +92,7 @@ if (!BUILDER_SECRET_PHRASE) {
 }
 
 // DynamoDB Service initialization
-const DYNAMODB_REGION = "us-west-1"
+const DYNAMODB_REGION = "us-east-1"
 const DYNAMODB_TABLE_NAME = "apix-iao-tokens"
 const USER_REQUEST_TABLE_NAME = "apix-iao-user-requests"
 const REQUEST_QUEUE_TABLE_NAME = "apix-iao-request-queue"
@@ -121,6 +126,78 @@ try {
 } catch (error) {
   console.error("⚠️  Failed to initialize Metrics service:", error)
   console.log("   Set METRICS_TABLE_NAME environment variable if needed")
+}
+
+// Agent Service initialization
+const AGENTS_TABLE_NAME = "apix-iao-agents"
+const CHAT_SESSIONS_TABLE_NAME = "apix-iao-chat-sessions"
+const CHAT_MESSAGES_TABLE_NAME = "apix-iao-chat-messages"
+const AGENT_PAYMENTS_TABLE_NAME = "apix-iao-agent-payments"
+const METRICS_TABLE_NAME_FOR_AGENTS = "apix-iao-metrics" // For reference
+
+let agentService: AgentService | null = null
+let chatSessionService: ChatSessionService | null = null
+
+try {
+  agentService = new AgentService(DYNAMODB_REGION, AGENTS_TABLE_NAME)
+  console.log(`✅ Agent service initialized (Table: ${AGENTS_TABLE_NAME})`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Agent service:", error)
+  console.log("   Run CREATE_AGENT_TABLES.sh to create DynamoDB tables")
+}
+
+try {
+  chatSessionService = new ChatSessionService(
+    DYNAMODB_REGION,
+    CHAT_SESSIONS_TABLE_NAME,
+    CHAT_MESSAGES_TABLE_NAME
+  )
+  console.log(`✅ Chat session service initialized (Tables: ${CHAT_SESSIONS_TABLE_NAME}, ${CHAT_MESSAGES_TABLE_NAME})`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Chat session service:", error)
+  console.log("   Run CREATE_AGENT_TABLES.sh to create DynamoDB tables")
+}
+
+// LLM Service initialization
+let llmService: LLMService | null = null
+try {
+  llmService = new LLMService()
+  const availableProviders = llmService.getAvailableProviders()
+  if (availableProviders.length > 0) {
+    console.log(`✅ LLM service initialized (Available providers: ${availableProviders.join(', ')})`)
+  } else {
+    console.warn("⚠️  No LLM providers configured. Set LLM API keys to enable agent chat:")
+    console.log("   - ANTHROPIC_API_KEY for Claude (recommended)")
+    console.log("   - OPENAI_API_KEY for GPT")
+    console.log("   - GOOGLE_AI_API_KEY for Gemini")
+  }
+} catch (error) {
+  console.error("⚠️  Failed to initialize LLM service:", error)
+}
+
+// Agent Tool Service initialization
+let agentToolService: AgentToolService | null = null
+try {
+  agentToolService = new AgentToolService(
+    process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3000}`
+  )
+  console.log(`✅ Agent tool service initialized`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Agent tool service:", error)
+}
+
+// Agent Payment Service initialization
+let agentPaymentService: AgentPaymentService | null = null
+try {
+  agentPaymentService = new AgentPaymentService(
+    DYNAMODB_REGION,
+    AGENT_PAYMENTS_TABLE_NAME,
+    process.env.THIRDWEB_SERVER_WALLET_ADDRESS
+  )
+  console.log(`✅ Agent payment service initialized (Table: ${AGENT_PAYMENTS_TABLE_NAME})`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Agent payment service:", error)
+  console.log("   Run CREATE_AGENT_TABLES.sh to create DynamoDB tables")
 }
 
 
@@ -2135,14 +2212,590 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
 app.get('/api/:serverSlug/:apiSlug', async (req, res) => {
   const serverSlug = req.params.serverSlug.toLowerCase()
   const apiSlug = req.params.apiSlug.toLowerCase()
-  
+
   return handleApiProxyRequest(req, res, serverSlug, apiSlug)
 })
 
+/**
+ * AGENT ENDPOINTS
+ */
+
+// POST /api/agents - Create a new agent
+app.post('/api/agents', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const { name, description, creator, llmProvider, availableTools, starterPrompts, isPublic } = req.body
+
+    // Validation
+    if (!name || !description || !creator || !llmProvider || !availableTools || !starterPrompts) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        required: ["name", "description", "creator", "llmProvider", "availableTools", "starterPrompts"]
+      })
+    }
+
+    if (!['claude', 'gpt', 'gemini'].includes(llmProvider)) {
+      return res.status(400).json({
+        error: "Invalid llmProvider. Must be one of: claude, gpt, gemini"
+      })
+    }
+
+    if (!Array.isArray(availableTools) || availableTools.length === 0) {
+      return res.status(400).json({
+        error: "availableTools must be a non-empty array"
+      })
+    }
+
+    if (!Array.isArray(starterPrompts) || starterPrompts.length === 0) {
+      return res.status(400).json({
+        error: "starterPrompts must be a non-empty array"
+      })
+    }
+
+    const params: CreateAgentParams = {
+      name,
+      description,
+      creator,
+      llmProvider,
+      availableTools,
+      starterPrompts,
+      isPublic: isPublic !== false
+    }
+
+    const agent = await agentService.createAgent(params)
+
+    return res.status(201).json({
+      success: true,
+      message: "Agent created successfully",
+      data: agent
+    })
+  } catch (error: any) {
+    console.error("Error creating agent:", error)
+    return res.status(500).json({
+      error: "Failed to create agent",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/agents - List all public agents
+app.get('/api/agents', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const agents = await agentService.getPublicAgents()
+
+    return res.json({
+      success: true,
+      count: agents.length,
+      data: agents
+    })
+  } catch (error: any) {
+    console.error("Error listing agents:", error)
+    return res.status(500).json({
+      error: "Failed to list agents",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/agents/:id - Get agent details
+app.get('/api/agents/:id', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const agent = await agentService.getAgent(req.params.id)
+
+    if (!agent) {
+      return res.status(404).json({
+        error: "Agent not found"
+      })
+    }
+
+    return res.json({
+      success: true,
+      data: agent
+    })
+  } catch (error: any) {
+    console.error("Error getting agent:", error)
+    return res.status(500).json({
+      error: "Failed to get agent",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/agents/my - Get user's agents (by creator wallet)
+app.get('/api/agents/my', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const creator = req.query.creator as string
+
+    if (!creator) {
+      return res.status(400).json({
+        error: "creator query parameter required"
+      })
+    }
+
+    const agents = await agentService.getAgentsByCreator(creator)
+
+    return res.json({
+      success: true,
+      creator,
+      count: agents.length,
+      data: agents
+    })
+  } catch (error: any) {
+    console.error("Error getting user agents:", error)
+    return res.status(500).json({
+      error: "Failed to get user agents",
+      message: error.message
+    })
+  }
+})
+
+// PUT /api/agents/:id - Update agent (creator only)
+app.put('/api/agents/:id', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const { id } = req.params
+    const creator = req.query.creator as string
+
+    if (!creator) {
+      return res.status(400).json({
+        error: "creator query parameter required"
+      })
+    }
+
+    // Verify ownership
+    const agent = await agentService.getAgent(id)
+    if (!agent) {
+      return res.status(404).json({ error: "Agent not found" })
+    }
+    if (agent.creator !== creator.toLowerCase()) {
+      return res.status(403).json({
+        error: "Unauthorized: Only agent creator can update"
+      })
+    }
+
+    const updates = req.body
+    const updatedAgent = await agentService.updateAgent(id, updates)
+
+    return res.json({
+      success: true,
+      message: "Agent updated successfully",
+      data: updatedAgent
+    })
+  } catch (error: any) {
+    console.error("Error updating agent:", error)
+    return res.status(500).json({
+      error: "Failed to update agent",
+      message: error.message
+    })
+  }
+})
+
+// DELETE /api/agents/:id - Delete agent (creator only)
+app.delete('/api/agents/:id', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const { id } = req.params
+    const creator = req.query.creator as string
+
+    if (!creator) {
+      return res.status(400).json({
+        error: "creator query parameter required"
+      })
+    }
+
+    await agentService.deleteAgent(id, creator)
+
+    return res.json({
+      success: true,
+      message: "Agent deleted successfully"
+    })
+  } catch (error: any) {
+    console.error("Error deleting agent:", error)
+    return res.status(500).json({
+      error: "Failed to delete agent",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/agents/:id/metrics - Get agent metrics
+app.get('/api/agents/:id/metrics', async (req, res) => {
+  try {
+    if (!agentService) {
+      return res.status(503).json({ error: "Agent service not initialized" })
+    }
+
+    const metrics = await agentService.getAgentMetrics(req.params.id)
+
+    if (!metrics) {
+      return res.status(404).json({
+        error: "Agent not found"
+      })
+    }
+
+    return res.json({
+      success: true,
+      data: metrics
+    })
+  } catch (error: any) {
+    console.error("Error getting agent metrics:", error)
+    return res.status(500).json({
+      error: "Failed to get agent metrics",
+      message: error.message
+    })
+  }
+})
+
+/**
+ * CHAT ENDPOINTS
+ */
+
+// POST /api/chat/sessions - Get or create a chat session
+app.post('/api/chat/sessions', async (req, res) => {
+  try {
+    if (!chatSessionService) {
+      return res.status(503).json({ error: "Chat service not initialized" })
+    }
+
+    const { agentId, userAddress } = req.body
+
+    if (!agentId || !userAddress) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        required: ["agentId", "userAddress"]
+      })
+    }
+
+    const session = await chatSessionService.getOrCreateSession(agentId, userAddress)
+
+    return res.status(201).json({
+      success: true,
+      data: session
+    })
+  } catch (error: any) {
+    console.error("Error creating chat session:", error)
+    return res.status(500).json({
+      error: "Failed to create chat session",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/chat/sessions/:id/messages - Get message history
+app.get('/api/chat/sessions/:id/messages', async (req, res) => {
+  try {
+    if (!chatSessionService) {
+      return res.status(503).json({ error: "Chat service not initialized" })
+    }
+
+    const limit = parseInt(req.query.limit as string) || 100
+    const messages = await chatSessionService.getRecentMessages(req.params.id, limit)
+
+    return res.json({
+      success: true,
+      count: messages.length,
+      data: messages
+    })
+  } catch (error: any) {
+    console.error("Error getting messages:", error)
+    return res.status(500).json({
+      error: "Failed to get messages",
+      message: error.message
+    })
+  }
+})
+
+// POST /api/chat/message - Send a chat message
+app.post('/api/chat/message', async (req, res) => {
+  try {
+    if (!chatSessionService) {
+      return res.status(503).json({ error: "Chat service not initialized" })
+    }
+
+    const { sessionId, content } = req.body
+
+    if (!sessionId || !content) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        required: ["sessionId", "content"]
+      })
+    }
+
+    // Save user message
+    const userMessage = await chatSessionService.saveMessage(
+      sessionId,
+      'user',
+      content
+    )
+
+    return res.status(201).json({
+      success: true,
+      message: "Message received. Streaming response...",
+      data: userMessage
+    })
+  } catch (error: any) {
+    console.error("Error saving message:", error)
+    return res.status(500).json({
+      error: "Failed to save message",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/chat/stream/:sessionId - SSE endpoint for streaming responses with agentic loop
+app.get('/api/chat/stream/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params
+
+    // Validate services
+    if (!chatSessionService || !agentService || !llmService || !agentToolService || !agentPaymentService) {
+      return res.status(503).json({ error: "Required services not initialized" })
+    }
+
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders()
+
+    const sendEvent = (type: string, data: any) => {
+      res.write(`data: ${JSON.stringify({ type, data })}\n\n`)
+    }
+
+    // Step 1: Get the session
+    const session = await chatSessionService.getSession(sessionId)
+    if (!session) {
+      sendEvent('error', { message: 'Session not found' })
+      res.end()
+      return
+    }
+
+    // Step 2: Get the agent
+    const agent = await agentService.getAgent(session.agentId)
+    if (!agent) {
+      sendEvent('error', { message: 'Agent not found' })
+      res.end()
+      return
+    }
+
+    // Step 3: Get recent messages (conversation history)
+    const messages = await chatSessionService.getRecentMessages(sessionId, 20)
+
+    // Convert to LLM format (filter out system messages, keep only user/assistant)
+    const llmMessages = messages
+      .filter(msg => msg.role === 'user' || msg.role === 'assistant')
+      .map(msg => ({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content
+      }))
+
+    // Step 4: Get tools for this agent
+    let tools = []
+    try {
+      tools = await agentToolService.getToolsForAgent(agent)
+    } catch (error) {
+      console.warn("Failed to load tools:", error)
+      sendEvent('warning', { message: 'Failed to load agent tools' })
+    }
+
+    // CRITICAL: Validate agent has at least one tool available
+    // Agents without tools cannot operate (tool-gating constraint)
+    if (tools.length === 0) {
+      console.warn(`❌ Agent ${agent.id} has no tools configured - cannot operate`)
+      sendEvent('error', {
+        message: 'This agent has no tools configured. Please contact the agent creator to add API access.'
+      })
+      res.end()
+      return
+    }
+
+    console.log(`✅ Agent ${agent.id} (${agent.name}) loaded with ${tools.length} tool(s)`)
+    console.log(`🔒 Tool-gating enabled: Agent can ONLY call these tools: ${tools.map(t => t.name).join(', ')}`)
+
+    // Step 5: System prompt for the agent
+    // CRITICAL: Enforce strict tool-gating - agents can ONLY respond based on tool execution
+    const systemPrompt = `You are ${agent.name}, an AI agent powered by decentralized APIs. You have access to specific tools to retrieve and analyze data.
+
+Your available tools (these are the ONLY data sources you can use):
+${tools.length > 0 ? tools.map(t => `- ${t.name}: ${t.description}`).join('\n') : 'NO TOOLS AVAILABLE'}
+
+CRITICAL CONSTRAINTS (you must follow these exactly):
+1. You MUST call tools to retrieve information - do not use your training knowledge
+2. You can ONLY provide information that comes directly from tool execution results
+3. Do NOT provide responses based on your internal knowledge or reasoning
+4. If a tool fails, respond with: "I was unable to retrieve data from [tool_name]. Please try again."
+5. If no tools are available, respond with: "I have no tools configured to help with this request."
+6. Always cite which tool provided the data you're reporting
+7. Do NOT provide general knowledge, advice, or analysis beyond what the tools return
+
+Remember: You are strictly tool-gated. Users cannot use you as a general LLM. You only have access to ${tools.length} specific API endpoint(s).
+
+Current Time: ${new Date().toISOString()}`
+
+    // Step 6: Stream LLM response with tool execution
+    let assistantMessage = ''
+    const toolCalls: Array<{ name: string; input: Record<string, any> }> = []
+    let hasError = false
+
+    try {
+      // Stream the LLM response
+      for await (const chunk of llmService.streamChat(agent.llmProvider as 'claude' | 'gpt' | 'gemini', llmMessages, tools, systemPrompt)) {
+        if (chunk.type === 'token') {
+          // Stream text token to client
+          assistantMessage += chunk.content
+          sendEvent('token', { content: chunk.content })
+        } else if (chunk.type === 'tool_call') {
+          // Tool call requested by LLM
+          const toolCall = chunk.tool
+          toolCalls.push({
+            name: toolCall.name,
+            input: toolCall.input
+          })
+
+          // Send tool call event
+          sendEvent('tool_call', {
+            name: toolCall.name,
+            description: tools.find(t => t.name === toolCall.name)?.description || 'Tool call'
+          })
+
+          // CRITICAL: Validate agent has access to this tool (tool-gating constraint)
+          const hasAccess = agentToolService.hasToolAccess(agent, toolCall.name)
+          if (!hasAccess) {
+            console.warn(`⚠️  UNAUTHORIZED TOOL ACCESS: Agent ${agent.id} attempted to call ${toolCall.name}`)
+            sendEvent('tool_error', {
+              toolName: toolCall.name,
+              error: `Access denied. This agent is not authorized to use the ${toolCall.name} tool.`
+            })
+            continue // Skip execution and continue
+          }
+
+          // Execute the tool
+          try {
+            const toolResult = await agentToolService.executeTool(toolCall, agent)
+
+            if (toolResult.success) {
+              // Format result for sending to client
+              const resultText = `Tool result from ${toolCall.name}:\n${JSON.stringify(toolResult.result, null, 2)}`
+
+              // Send tool result event
+              sendEvent('tool_result', {
+                toolName: toolCall.name,
+                success: true,
+                result: toolResult.result
+              })
+
+              // Record payment for API call
+              try {
+                // Extract server and API slug from tool name
+                // Tool name format: call_serverSlug_apiSlug
+                const toolNameParts = toolCall.name.replace('call_', '').split('_')
+                const serverSlug = toolNameParts[0]
+                const apiSlug = toolNameParts.slice(1).join('_')
+
+                // Get API fee
+                const fee = await agentToolService.getApiCallFee(serverSlug, apiSlug)
+
+                // Record payment
+                await agentPaymentService.recordPayment(
+                  agent.id,
+                  sessionId,
+                  serverSlug,
+                  apiSlug,
+                  fee,
+                  'USDC', // Default payment token, can be made configurable
+                  undefined // txHash - Phase 4 placeholder, Phase 5 will have actual tx
+                )
+
+                sendEvent('payment_recorded', {
+                  serverSlug,
+                  apiSlug,
+                  fee,
+                  displayFee: AgentPaymentService.formatFeeForDisplay(fee)
+                })
+              } catch (paymentError) {
+                console.error("Failed to record payment:", paymentError)
+                sendEvent('payment_error', { message: 'Failed to record payment' })
+              }
+            } else {
+              // Tool execution failed
+              sendEvent('tool_result', {
+                toolName: toolCall.name,
+                success: false,
+                error: toolResult.error
+              })
+            }
+          } catch (execError: any) {
+            console.error("Tool execution error:", execError)
+            sendEvent('tool_error', {
+              toolName: toolCall.name,
+              error: execError.message
+            })
+          }
+        } else if (chunk.type === 'done') {
+          // LLM streaming complete
+          sendEvent('done', { success: true })
+        }
+      }
+    } catch (streamError: any) {
+      console.error("LLM streaming error:", streamError)
+      hasError = true
+      sendEvent('error', { message: streamError.message })
+    }
+
+    // Step 7: Save the assistant message to the session
+    if (!hasError && assistantMessage) {
+      try {
+        await chatSessionService.saveMessage(sessionId, 'assistant', assistantMessage)
+
+        // Increment agent metrics
+        await agentService.incrementMetric(agent.id, 'totalMessages')
+        if (toolCalls.length > 0) {
+          await agentService.incrementMetric(agent.id, 'totalToolCalls')
+        }
+      } catch (saveError) {
+        console.error("Failed to save assistant message:", saveError)
+      }
+    }
+
+    // Step 8: Prune old messages (keep only last 100)
+    try {
+      await chatSessionService.pruneOldMessages(sessionId, 100)
+    } catch (pruneError) {
+      console.warn("Failed to prune old messages:", pruneError)
+    }
+
+    res.end()
+  } catch (error: any) {
+    console.error("Error in SSE stream:", error)
+    res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`)
+    res.end()
+  }
+})
 
 // Start server if running directly (not in Vercel)
 if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000
+  const PORT = process.env.PORT || 4000
   app.listen(PORT, () => {
     console.log(`🚀 Express server running on port ${PORT}`)
     console.log(`📱 Base URL: http://localhost:${PORT}`)
