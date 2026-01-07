@@ -92,7 +92,7 @@ if (!BUILDER_SECRET_PHRASE) {
 }
 
 // DynamoDB Service initialization
-const DYNAMODB_REGION = "us-east-1"
+const DYNAMODB_REGION = "us-west-1"
 const DYNAMODB_TABLE_NAME = "apix-iao-tokens"
 const USER_REQUEST_TABLE_NAME = "apix-iao-user-requests"
 const REQUEST_QUEUE_TABLE_NAME = "apix-iao-request-queue"
@@ -2208,16 +2208,9 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
   }
 }
 
-// Handle GET requests for /api/:serverSlug/:apiSlug (slug-based routing)
-app.get('/api/:serverSlug/:apiSlug', async (req, res) => {
-  const serverSlug = req.params.serverSlug.toLowerCase()
-  const apiSlug = req.params.apiSlug.toLowerCase()
-
-  return handleApiProxyRequest(req, res, serverSlug, apiSlug)
-})
-
 /**
  * AGENT ENDPOINTS
+ * NOTE: Must be defined before catch-all /api/:serverSlug/:apiSlug route
  */
 
 // POST /api/agents - Create a new agent
@@ -2467,6 +2460,15 @@ app.get('/api/agents/:id/metrics', async (req, res) => {
   }
 })
 
+// Handle GET requests for /api/:serverSlug/:apiSlug (slug-based routing)
+// NOTE: Must be defined AFTER all specific /api/* routes
+app.get('/api/:serverSlug/:apiSlug', async (req, res) => {
+  const serverSlug = req.params.serverSlug.toLowerCase()
+  const apiSlug = req.params.apiSlug.toLowerCase()
+
+  return handleApiProxyRequest(req, res, serverSlug, apiSlug)
+})
+
 /**
  * CHAT ENDPOINTS
  */
@@ -2600,15 +2602,31 @@ app.get('/api/chat/stream/:sessionId', async (req, res) => {
     }
 
     // Step 3: Get recent messages (conversation history)
-    const messages = await chatSessionService.getRecentMessages(sessionId, 20)
+    // Keep last 100 messages for better context (previously was 20)
+    const messages = await chatSessionService.getRecentMessages(sessionId, 100)
+
+    console.log(`📨 Loaded ${messages.length} messages from session`)
 
     // Convert to LLM format (filter out system messages, keep only user/assistant)
-    const llmMessages = messages
+    let llmMessages = messages
       .filter(msg => msg.role === 'user' || msg.role === 'assistant')
       .map(msg => ({
         role: msg.role as 'user' | 'assistant',
         content: msg.content
       }))
+
+    // For Haiku (8k context), limit to last 15 messages to avoid token overflow
+    // System prompt + tools + many messages can exceed context window
+    if (agent.llmProvider === 'claude' && llmMessages.length > 15) {
+      console.warn(`⚠️  Truncating ${llmMessages.length} messages to 15 for Haiku token limit`)
+      llmMessages = llmMessages.slice(-15)
+    }
+
+    console.log(`📊 Sending ${llmMessages.length} messages to LLM for context`)
+
+    // Check if last message contains API result from payment
+    const lastMessage = messages[messages.length - 1]
+    const isPaymentResult = lastMessage?.content?.includes('Payment successful!')
 
     // Step 4: Get tools for this agent
     let tools = []
@@ -2634,24 +2652,38 @@ app.get('/api/chat/stream/:sessionId', async (req, res) => {
     console.log(`🔒 Tool-gating enabled: Agent can ONLY call these tools: ${tools.map(t => t.name).join(', ')}`)
 
     // Step 5: System prompt for the agent
-    // CRITICAL: Enforce strict tool-gating - agents can ONLY respond based on tool execution
-    const systemPrompt = `You are ${agent.name}, an AI agent powered by decentralized APIs. You have access to specific tools to retrieve and analyze data.
+    // STRICT TOOL-GATING: Agent ONLY answers questions about available APIs
+    let systemPrompt = `You are ${agent.name}. Your ONLY purpose is to help users access these specific decentralized APIs:
 
-Your available tools (these are the ONLY data sources you can use):
-${tools.length > 0 ? tools.map(t => `- ${t.name}: ${t.description}`).join('\n') : 'NO TOOLS AVAILABLE'}
+${tools.length > 0 ? tools.map(t => `• ${t.name}: ${t.description}`).join('\n') : 'NO TOOLS AVAILABLE'}
 
-CRITICAL CONSTRAINTS (you must follow these exactly):
-1. You MUST call tools to retrieve information - do not use your training knowledge
-2. You can ONLY provide information that comes directly from tool execution results
-3. Do NOT provide responses based on your internal knowledge or reasoning
-4. If a tool fails, respond with: "I was unable to retrieve data from [tool_name]. Please try again."
-5. If no tools are available, respond with: "I have no tools configured to help with this request."
-6. Always cite which tool provided the data you're reporting
-7. Do NOT provide general knowledge, advice, or analysis beyond what the tools return
+CRITICAL RULES:
+1. You ONLY answer questions that can be solved by the APIs listed above
+2. You MUST decline any questions NOT related to these APIs
+3. When recommending an API, call it as a tool (Claude will show a payment button)
+4. Do NOT provide general knowledge or answers outside these APIs
+5. If a user asks about anything else, respond: "I can only help with: [list your APIs]. What would you like to do?"
 
-Remember: You are strictly tool-gated. Users cannot use you as a general LLM. You only have access to ${tools.length} specific API endpoint(s).
+TOOL-GATING CONSTRAINT:
+- You have EXACTLY ${tools.length} API(s) available
+- You cannot answer general questions like "how to lose weight", "tell me about history", etc.
+- You MUST stay in your domain
+- If no API matches the user's request, decline clearly
 
-Current Time: ${new Date().toISOString()}`
+Example conversation:
+User: "How to lose weight?"
+You: "I can only help with the APIs on this server: ${tools.length > 0 ? tools.map(t => t.name).join(', ') : 'none'}. What would you like to do?"
+
+User: "Can I get a random user profile?"
+You: "Yes! I can get you a random user profile. Let me fetch that for you."
+[System shows payment button]
+
+After payment, analyze the returned data and provide insights.`
+
+    // Add context if this is a response to payment result
+    if (isPaymentResult) {
+      systemPrompt += `\n\nThe user just paid for and received API data. Analyze the result and provide a helpful summary or insights.`
+    }
 
     // Step 6: Stream LLM response with tool execution
     let assistantMessage = ''
@@ -2659,6 +2691,10 @@ Current Time: ${new Date().toISOString()}`
     let hasError = false
 
     try {
+      console.log(`🚀 Starting LLM stream with ${llmMessages.length} messages`)
+      console.log(`📝 System prompt length: ${systemPrompt.length} chars, ${Math.ceil(systemPrompt.length / 4)} tokens (estimated)`)
+      console.log(`🔧 Tools count: ${tools.length}`)
+
       // Stream the LLM response
       for await (const chunk of llmService.streamChat(agent.llmProvider as 'claude' | 'gpt' | 'gemini', llmMessages, tools, systemPrompt)) {
         if (chunk.type === 'token') {
@@ -2666,90 +2702,68 @@ Current Time: ${new Date().toISOString()}`
           assistantMessage += chunk.content
           sendEvent('token', { content: chunk.content })
         } else if (chunk.type === 'tool_call') {
-          // Tool call requested by LLM
+          // Tool call requested by LLM - don't execute, send payment option instead
           const toolCall = chunk.tool
           toolCalls.push({
             name: toolCall.name,
             input: toolCall.input
           })
 
-          // Send tool call event
-          sendEvent('tool_call', {
-            name: toolCall.name,
-            description: tools.find(t => t.name === toolCall.name)?.description || 'Tool call'
-          })
-
           // CRITICAL: Validate agent has access to this tool (tool-gating constraint)
           const hasAccess = agentToolService.hasToolAccess(agent, toolCall.name)
           if (!hasAccess) {
             console.warn(`⚠️  UNAUTHORIZED TOOL ACCESS: Agent ${agent.id} attempted to call ${toolCall.name}`)
-            sendEvent('tool_error', {
-              toolName: toolCall.name,
-              error: `Access denied. This agent is not authorized to use the ${toolCall.name} tool.`
+            sendEvent('error', {
+              message: `Access denied. This agent is not authorized to use the ${toolCall.name} tool.`
             })
-            continue // Skip execution and continue
+            continue // Skip and continue
           }
 
-          // Execute the tool
-          try {
-            const toolResult = await agentToolService.executeTool(toolCall, agent)
+          // Find which availableTools entry this tool_call corresponds to
+          // Can't just parse tool name because slugs may contain hyphens converted to underscores
+          let serverSlug = ''
+          let apiSlug = ''
 
-            if (toolResult.success) {
-              // Format result for sending to client
-              const resultText = `Tool result from ${toolCall.name}:\n${JSON.stringify(toolResult.result, null, 2)}`
-
-              // Send tool result event
-              sendEvent('tool_result', {
-                toolName: toolCall.name,
-                success: true,
-                result: toolResult.result
-              })
-
-              // Record payment for API call
-              try {
-                // Extract server and API slug from tool name
-                // Tool name format: call_serverSlug_apiSlug
-                const toolNameParts = toolCall.name.replace('call_', '').split('_')
-                const serverSlug = toolNameParts[0]
-                const apiSlug = toolNameParts.slice(1).join('_')
-
-                // Get API fee
-                const fee = await agentToolService.getApiCallFee(serverSlug, apiSlug)
-
-                // Record payment
-                await agentPaymentService.recordPayment(
-                  agent.id,
-                  sessionId,
-                  serverSlug,
-                  apiSlug,
-                  fee,
-                  'USDC', // Default payment token, can be made configurable
-                  undefined // txHash - Phase 4 placeholder, Phase 5 will have actual tx
-                )
-
-                sendEvent('payment_recorded', {
-                  serverSlug,
-                  apiSlug,
-                  fee,
-                  displayFee: AgentPaymentService.formatFeeForDisplay(fee)
-                })
-              } catch (paymentError) {
-                console.error("Failed to record payment:", paymentError)
-                sendEvent('payment_error', { message: 'Failed to record payment' })
-              }
-            } else {
-              // Tool execution failed
-              sendEvent('tool_result', {
-                toolName: toolCall.name,
-                success: false,
-                error: toolResult.error
-              })
+          for (const toolString of agent.availableTools) {
+            const [s, a] = toolString.split('/')
+            const generatedToolName = `call_${s}_${a}`.replace(/-/g, '_').toLowerCase()
+            if (generatedToolName === toolCall.name.toLowerCase()) {
+              serverSlug = s
+              apiSlug = a
+              break
             }
-          } catch (execError: any) {
-            console.error("Tool execution error:", execError)
-            sendEvent('tool_error', {
+          }
+
+          if (!serverSlug || !apiSlug) {
+            console.error(`Could not find server/API for tool: ${toolCall.name}`)
+            sendEvent('error', {
+              message: `Could not find API information for ${toolCall.name}`
+            })
+            continue
+          }
+
+          try {
+            // Get API info for payment option
+            const apiInfo = await agentToolService.getApiInfo(serverSlug, apiSlug)
+
+            // Send payment option event to frontend
+            sendEvent('payment_option', {
               toolName: toolCall.name,
-              error: execError.message
+              toolDisplayName: apiInfo.name,
+              serverSlug,
+              apiSlug,
+              fee: apiInfo.fee,
+              displayFee: AgentPaymentService.formatFeeForDisplay(apiInfo.fee),
+              tokenAddress: apiInfo.tokenAddress,
+              description: apiInfo.description
+            })
+
+            console.log(`💳 Payment option sent for ${toolCall.name}: ${apiInfo.name} (${AgentPaymentService.formatFeeForDisplay(apiInfo.fee)})`)
+
+          } catch (error: any) {
+            console.error(`Failed to get API info for ${toolCall.name}:`, error)
+            sendEvent('error', {
+              message: `Failed to load payment option: ${error.message}`
             })
           }
         } else if (chunk.type === 'done') {
@@ -2757,8 +2771,10 @@ Current Time: ${new Date().toISOString()}`
           sendEvent('done', { success: true })
         }
       }
+
+      console.log(`✅ LLM streaming completed. Assistant message length: ${assistantMessage.length}`)
     } catch (streamError: any) {
-      console.error("LLM streaming error:", streamError)
+      console.error("❌ LLM streaming error:", streamError)
       hasError = true
       sendEvent('error', { message: streamError.message })
     }
@@ -2795,7 +2811,7 @@ Current Time: ${new Date().toISOString()}`
 
 // Start server if running directly (not in Vercel)
 if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 4000
+  const PORT = process.env.PORT || 3000
   app.listen(PORT, () => {
     console.log(`🚀 Express server running on port ${PORT}`)
     console.log(`📱 Base URL: http://localhost:${PORT}`)
