@@ -34,7 +34,7 @@ export interface LLMResponse {
 }
 
 export class LLMService {
-  private claudeClient: Anthropic | null = null
+  private claudeClient: InstanceType<typeof Anthropic> | null = null
   private gptApiKey: string | null = null
   private geminiApiKey: string | null = null
 
