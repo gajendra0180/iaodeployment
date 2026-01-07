@@ -3,7 +3,7 @@
  * Handles streaming responses and tool calling
  */
 
-import Anthropic from '@anthropic-ai/sdk'
+import { Anthropic } from '@anthropic-ai/sdk'
 
 // Type definitions for LLM interactions
 export interface LLMMessage {
@@ -34,7 +34,7 @@ export interface LLMResponse {
 }
 
 export class LLMService {
-  private claudeClient: InstanceType<typeof Anthropic> | null = null
+  private claudeClient: Anthropic | null = null
   private gptApiKey: string | null = null
   private geminiApiKey: string | null = null
 
