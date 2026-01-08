@@ -97,15 +97,28 @@ export class AgentToolService {
         // Create tool definition
         const toolName = `call_${serverSlug}_${apiSlug}`.replace(/-/g, '_').toLowerCase()
 
+        // Build comprehensive description including usage examples
+        let description = `${api.name || api.slug} - ${api.description || 'No description available'}`
+
+        // Extract and highlight usage examples from description
+        const usageMatch = api.description?.match(/usage example[s]?:?\s*(.+)/i)
+        let queryDescription = 'Query parameters for the API call (e.g., "base=USD" or "latitude=52.52&longitude=13.41")'
+
+        if (usageMatch) {
+          // Parse usage examples to help agent understand query params
+          const examples = usageMatch[1]
+          queryDescription = `Query parameters for the API call. Examples from docs: ${examples.slice(0, 200)}`
+        }
+
         const tool: ToolDefinition = {
           name: toolName,
-          description: `${api.name || api.slug} (Server: ${serverSlug}, API: ${apiSlug}). ${api.description || 'No description available'}. Fee: ${api.fee} wei`,
+          description: `${description}\nFee: ${api.fee} wei`,
           input_schema: {
             type: 'object',
             properties: {
               query: {
                 type: 'string',
-                description: 'Optional query parameters or request data for the API call'
+                description: queryDescription
               }
             },
             required: []
@@ -192,7 +205,15 @@ export class AgentToolService {
       const apiUrl = `${this.backendUrl}/api/${serverSlug}/${apiSlug}`
 
       // Get request parameters from tool input
-      const queryParam = toolCall.input?.query ? `?q=${encodeURIComponent(toolCall.input.query)}` : ''
+      // Support both raw query strings (e.g., "base=USD&date=2024-01-01") and already formatted params
+      let queryParam = ''
+      if (toolCall.input?.query) {
+        const query = toolCall.input.query.trim()
+        // If query already starts with '?', use as-is. Otherwise, add '?'
+        queryParam = query.startsWith('?') ? query : `?${query}`
+      }
+
+      console.log(`🌐 Calling API: ${apiUrl}${queryParam}`)
 
       // Call the IAO API with timeout
       const controller = new AbortController()
