@@ -7,6 +7,7 @@
  */
 
 import fetch from 'node-fetch'
+import { decompress as decompressZstd } from 'fzstd'
 import { Agent } from './agentService.js'
 import { ToolDefinition, ToolCall } from './llmService.js'
 
@@ -234,7 +235,32 @@ export class AgentToolService {
         throw new Error(`API returned ${response.status}: ${errorData}`)
       }
 
-      const result = await response.json()
+      // Check if response is zstd compressed
+      const contentEncoding = response.headers.get('content-encoding') || ''
+      const contentType = response.headers.get('content-type') || ''
+      let result: any
+
+      if (contentEncoding.toLowerCase().includes('zstd')) {
+        console.log(`🗜️  API response is zstd compressed - decompressing...`)
+        try {
+          // Get compressed data as buffer
+          const compressedData = await response.arrayBuffer()
+          const compressedBuffer = Buffer.from(compressedData)
+
+          // Decompress
+          const decompressedBuffer = decompressZstd(compressedBuffer)
+          const decompressedText = Buffer.from(decompressedBuffer).toString('utf-8')
+
+          // Parse as JSON
+          result = JSON.parse(decompressedText)
+          console.log(`✅ Successfully decompressed and parsed zstd response`)
+        } catch (decompressError: any) {
+          throw new Error(`Failed to decompress zstd response: ${decompressError.message}`)
+        }
+      } else {
+        // Normal JSON parsing for uncompressed or gzip/deflate responses (handled by node-fetch)
+        result = await response.json()
+      }
 
       // Extract the actual data from response (handle both wrapper and direct formats)
       const apiData = (result as any)?.data || result

@@ -9,6 +9,7 @@ import { baseSepolia } from 'thirdweb/chains'
 import { getContract, readContract } from 'thirdweb'
 import fetch from 'node-fetch'
 import fs from 'fs'
+import { decompress as decompressZstd } from 'fzstd'
 import { DynamoDBService, IAOTokenDBEntry, ApiEntry } from './services/dynamoDBService.js'
 import { UserRequestService } from './services/userRequestService.js'
 import { MetricsService } from './services/metricsService.js'
@@ -1888,29 +1889,32 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         
         // Handle zstd compression
         if (contentEncoding && contentEncoding.toLowerCase().includes('zstd')) {
-          console.warn("⚠️  Response indicates zstd compression - attempting to parse anyway")
+          console.log("🗜️  Response is zstd compressed - decompressing...")
           try {
-            const responseText = await builderResponse.text()
-            if (responseText.trim().startsWith('{') || responseText.trim().startsWith('[')) {
-              try {
-                parsedData = JSON.parse(responseText)
-                console.log("✅ Parsed zstd-flagged response as JSON")
-        } catch {
-                parsedData = {
-                  error: "Unsupported compression",
-                  message: "The API response is compressed with zstd, which is not supported."
-                }
-              }
+            // Get the compressed data as a buffer
+            const compressedData = await builderResponse.arrayBuffer()
+            const compressedBuffer = Buffer.from(compressedData)
+
+            // Decompress using fzstd
+            const decompressedBuffer = decompressZstd(compressedBuffer)
+            const decompressedText = Buffer.from(decompressedBuffer).toString('utf-8')
+
+            console.log("✅ Successfully decompressed zstd data")
+
+            // Parse the decompressed data
+            if (contentType.includes('application/json') ||
+                decompressedText.trim().startsWith('{') ||
+                decompressedText.trim().startsWith('[')) {
+              parsedData = JSON.parse(decompressedText)
+              console.log("✅ Parsed decompressed data as JSON")
             } else {
-              parsedData = {
-                error: "Unsupported compression",
-                message: "The API response is compressed with zstd, which is not supported."
-              }
+              parsedData = decompressedText
             }
-          } catch {
+          } catch (decompressError: any) {
+            console.error("❌ Failed to decompress zstd data:", decompressError)
             parsedData = {
-              error: "Unsupported compression",
-              message: "The API response is compressed with zstd, which is not supported."
+              error: "Decompression failed",
+              message: `Failed to decompress zstd data: ${decompressError.message}`
             }
           }
         } else {
