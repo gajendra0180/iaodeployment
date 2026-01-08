@@ -178,10 +178,15 @@ try {
 // Agent Tool Service initialization
 let agentToolService: AgentToolService | null = null
 try {
-  agentToolService = new AgentToolService(
-    process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3000}`
-  )
-  console.log(`✅ Agent tool service initialized`)
+  // Determine backend URL (for self-referencing API calls)
+  // Priority: BACKEND_URL env var > Vercel URL > localhost
+  const backendUrl =
+    process.env.BACKEND_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined) ||
+    `http://localhost:${process.env.PORT || 3000}`
+
+  agentToolService = new AgentToolService(backendUrl)
+  console.log(`✅ Agent tool service initialized with URL: ${backendUrl}`)
 } catch (error) {
   console.error("⚠️  Failed to initialize Agent tool service:", error)
 }
