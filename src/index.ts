@@ -672,17 +672,6 @@ app.post('/api/register', async (req, res) => {
         })
       }
 
-      // Check if builder already has a server registered
-      const existingTokens = await dynamoDBService.scanItemsByBuilder(builder)
-      if (existingTokens.length > 0) {
-        const existingToken = existingTokens[0]
-        return res.status(409).json({
-          error: "You already have an active server",
-          message: `This address already has a registered server. Use /api/add-api to add more APIs.`,
-          existingServerSlug: existingToken.slug,
-          existingServerName: existingToken.name,
-        })
-      }
 
       // Validate API fields and check for duplicates
       const apiUrls: string[] = []
@@ -879,17 +868,6 @@ app.post('/api/register', async (req, res) => {
       })
     }
 
-    // Check if builder already has a server registered (1 builder = 1 server restriction)
-    const existingTokens = await dynamoDBService.scanItemsByBuilder(builder)
-    if (existingTokens.length > 0) {
-      const existingToken = existingTokens[0]
-      return res.status(409).json({
-        error: "You already have an active server",
-        message: `This address already has a registered server. Use /api/add-api to add more APIs to your existing server.`,
-        existingServerSlug: existingToken.slug,
-        existingServerName: existingToken.name,
-      })
-    }
 
     // Check if token address already exists
     const existingToken = await dynamoDBService.getItem(tokenAddress.toLowerCase())
