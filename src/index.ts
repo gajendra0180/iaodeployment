@@ -2467,7 +2467,7 @@ app.post('/api/chat/sessions', async (req, res) => {
       return res.status(503).json({ error: "Chat service not initialized" })
     }
 
-    const { agentId, userAddress } = req.body
+    const { agentId, userAddress, forceNew } = req.body
 
     if (!agentId || !userAddress) {
       return res.status(400).json({
@@ -2476,7 +2476,13 @@ app.post('/api/chat/sessions', async (req, res) => {
       })
     }
 
-    const session = await chatSessionService.getOrCreateSession(agentId, userAddress)
+    let session
+    if (forceNew) {
+      // Force create a new session (for "New Chat" button)
+      session = await chatSessionService.createNewSession(agentId, userAddress)
+    } else {
+      session = await chatSessionService.getOrCreateSession(agentId, userAddress)
+    }
 
     return res.status(201).json({
       success: true,
@@ -2486,6 +2492,41 @@ app.post('/api/chat/sessions', async (req, res) => {
     console.error("Error creating chat session:", error)
     return res.status(500).json({
       error: "Failed to create chat session",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/chat/sessions/user/:userAddress - Get all sessions for a user (optionally filtered by agent)
+app.get('/api/chat/sessions/user/:userAddress', async (req, res) => {
+  try {
+    if (!chatSessionService) {
+      return res.status(503).json({ error: "Chat service not initialized" })
+    }
+
+    const { userAddress } = req.params
+    const { agentId } = req.query
+
+    const sessions = await chatSessionService.getUserSessions(userAddress)
+
+    // Filter by agent if specified
+    const filteredSessions = agentId
+      ? sessions.filter(s => s.agentId === agentId)
+      : sessions
+
+    // Sort by lastMessageAt descending (most recent first)
+    filteredSessions.sort((a, b) =>
+      new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+    )
+
+    return res.status(200).json({
+      success: true,
+      data: filteredSessions
+    })
+  } catch (error: any) {
+    console.error("Error getting user sessions:", error)
+    return res.status(500).json({
+      error: "Failed to get user sessions",
       message: error.message
     })
   }
