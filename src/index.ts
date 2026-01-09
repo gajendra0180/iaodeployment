@@ -10,7 +10,7 @@ import { getContract, readContract } from 'thirdweb'
 import fetch from 'node-fetch'
 import fs from 'fs'
 import { decompress as decompressZstd } from 'fzstd'
-import { DynamoDBService, IAOTokenDBEntry, ApiEntry } from './services/dynamoDBService.js'
+import { DynamoDBService, IAOTokenDBEntry, ApiEntry, ChainType } from './services/dynamoDBService.js'
 import { UserRequestService } from './services/userRequestService.js'
 import { MetricsService } from './services/metricsService.js'
 import { AgentService, CreateAgentParams } from './services/agentService.js'
@@ -18,6 +18,10 @@ import { ChatSessionService } from './services/chatSessionService.js'
 import { LLMService } from './services/llmService.js'
 import { AgentToolService } from './services/agentToolService.js'
 import { AgentPaymentService } from './services/agentPaymentService.js'
+import { ChainConfigService, ChainConfigEntry } from './services/chainConfigService.js'
+import { EVMContractService } from './services/evmContractService.js'
+import { SolanaContractService } from './services/solanaContractService.js'
+import { MultiChainPaymentService } from './services/multiChainPaymentService.js'
 import { generateBuilderJWT } from './utils/jwtAuth.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -93,7 +97,7 @@ if (!BUILDER_SECRET_PHRASE) {
 }
 
 // DynamoDB Service initialization
-const DYNAMODB_REGION = "us-west-1"
+const DYNAMODB_REGION = "us-east-1"
 const DYNAMODB_TABLE_NAME = "apix-iao-tokens"
 const USER_REQUEST_TABLE_NAME = "apix-iao-user-requests"
 const REQUEST_QUEUE_TABLE_NAME = "apix-iao-request-queue"
@@ -204,6 +208,49 @@ try {
 } catch (error) {
   console.error("⚠️  Failed to initialize Agent payment service:", error)
   console.log("   Run CREATE_AGENT_TABLES.sh to create DynamoDB tables")
+}
+
+// Chain Config Service initialization (Multi-chain support)
+const CHAIN_CONFIG_TABLE_NAME = "apix-iao-chain-config"
+let chainConfigService: ChainConfigService | null = null
+try {
+  chainConfigService = new ChainConfigService(DYNAMODB_REGION, CHAIN_CONFIG_TABLE_NAME)
+  console.log(`✅ Chain config service initialized (Table: ${CHAIN_CONFIG_TABLE_NAME})`)
+
+  // Seed default chain configurations on startup
+  chainConfigService.seedDefaultConfigs().catch(err => {
+    console.warn("⚠️  Failed to seed default chain configs:", err.message)
+  })
+} catch (error) {
+  console.error("⚠️  Failed to initialize Chain config service:", error)
+  console.log("   Run CREATE_DYNAMODB_TABLES.sh or MIGRATE_MULTICHAIN.sh to create the table")
+}
+
+// EVM Contract Service initialization
+let evmContractService: EVMContractService | null = null
+try {
+  evmContractService = new EVMContractService(IAO_FACTORY_ADDRESS)
+  console.log(`✅ EVM Contract Service initialized (Factory: ${IAO_FACTORY_ADDRESS})`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize EVM Contract Service:", error)
+}
+
+// Solana Contract Service initialization
+let solanaContractService: SolanaContractService | null = null
+try {
+  solanaContractService = new SolanaContractService()
+  console.log(`✅ Solana Contract Service initialized`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Solana Contract Service:", error)
+}
+
+// Multi-Chain Payment Service initialization
+let multiChainPaymentService: MultiChainPaymentService | null = null
+try {
+  multiChainPaymentService = new MultiChainPaymentService()
+  console.log(`✅ Multi-Chain Payment Service initialized`)
+} catch (error) {
+  console.error("⚠️  Failed to initialize Multi-Chain Payment Service:", error)
 }
 
 
@@ -617,7 +664,29 @@ app.post('/api/register', async (req, res) => {
       builder,
       paymentToken,
       tags,       // Array of category tags (optional)
+      chainId = "84532",    // Chain ID: "84532" (Base Sepolia) or "devnet" (Solana) - defaults to Base Sepolia
     } = req.body
+
+    // Validate chainId and get chain config
+    let chainConfig: ChainConfigEntry | null = null
+    if (chainConfigService) {
+      chainConfig = await chainConfigService.getChainConfig(chainId)
+      if (!chainConfig) {
+        return res.status(400).json({
+          error: "Invalid chain",
+          message: `Chain ID "${chainId}" is not supported. Use "84532" for Base Sepolia or "devnet" for Solana.`
+        })
+      }
+      if (!chainConfig.enabled) {
+        return res.status(400).json({
+          error: "Chain disabled",
+          message: `Chain "${chainConfig.name}" is currently disabled for new registrations.`
+        })
+      }
+    }
+
+    // Determine chain type from chainId
+    const chainType = chainConfig?.chainType || (chainId === "devnet" ? "solana" : "evm") as ChainType
 
     // VALIDATION MODE: If tokenAddress is missing, just validate and return
     if (!tokenAddress) {
@@ -646,13 +715,24 @@ app.post('/api/register', async (req, res) => {
         })
       }
 
-      // Validate address format
-      const addressRegex = /^0x[a-fA-F0-9]{40}$/i
-      if (!addressRegex.test(builder)) {
-        return res.status(400).json({
-          error: "Invalid address format",
-          message: "builder must be a valid Ethereum address"
-        })
+      // Validate address format based on chain type
+      if (chainType === 'evm') {
+        const evmAddressRegex = /^0x[a-fA-F0-9]{40}$/i
+        if (!evmAddressRegex.test(builder)) {
+          return res.status(400).json({
+            error: "Invalid address format",
+            message: "builder must be a valid Ethereum address (0x...)"
+          })
+        }
+      } else if (chainType === 'solana') {
+        // Solana addresses are base58 encoded, 32-44 characters
+        const solanaAddressRegex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
+        if (!solanaAddressRegex.test(builder)) {
+          return res.status(400).json({
+            error: "Invalid address format",
+            message: "builder must be a valid Solana address (base58 encoded)"
+          })
+        }
       }
 
       // Check if DynamoDB is configured
@@ -663,12 +743,13 @@ app.post('/api/register', async (req, res) => {
         })
       }
 
-      // Check if server slug already exists
-      const existingBySlug = await dynamoDBService.getItemBySlug(finalServerSlug)
-      if (existingBySlug) {
+      // Check if server slug already exists within this chain
+      // Slugs are unique per chain, not globally
+      const slugExistsInChain = await dynamoDBService.slugExistsInChain(finalServerSlug, chainId)
+      if (slugExistsInChain) {
         return res.status(409).json({
           error: "Server slug already taken",
-          message: `The slug "${finalServerSlug}" is already registered. Please choose a different slug.`
+          message: `The slug "${finalServerSlug}" is already registered on ${chainConfig?.name || chainId}. Please choose a different slug.`
         })
       }
 
@@ -842,13 +923,23 @@ app.post('/api/register', async (req, res) => {
       })
     }
 
-    // Validate address format
-    const addressRegex = /^0x[a-fA-F0-9]{40}$/i
-    if (!addressRegex.test(tokenAddress) || !addressRegex.test(builder) || !addressRegex.test(paymentToken)) {
-      return res.status(400).json({
-        error: "Invalid address format",
-        message: "tokenAddress, builder, and paymentToken must be valid Ethereum addresses"
-      })
+    // Validate address format based on chain type
+    if (chainType === 'evm') {
+      const evmAddressRegex = /^0x[a-fA-F0-9]{40}$/i
+      if (!evmAddressRegex.test(tokenAddress) || !evmAddressRegex.test(builder) || !evmAddressRegex.test(paymentToken)) {
+        return res.status(400).json({
+          error: "Invalid address format",
+          message: "tokenAddress, builder, and paymentToken must be valid Ethereum addresses (0x...)"
+        })
+      }
+    } else if (chainType === 'solana') {
+      const solanaAddressRegex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
+      if (!solanaAddressRegex.test(tokenAddress) || !solanaAddressRegex.test(builder) || !solanaAddressRegex.test(paymentToken)) {
+        return res.status(400).json({
+          error: "Invalid address format",
+          message: "tokenAddress, builder, and paymentToken must be valid Solana addresses (base58 encoded)"
+        })
+      }
     }
 
     // Check if DynamoDB is configured
@@ -859,12 +950,13 @@ app.post('/api/register', async (req, res) => {
       })
     }
 
-    // Check if server slug already exists
-    const existingBySlug = await dynamoDBService.getItemBySlug(finalServerSlug)
-    if (existingBySlug) {
+    // Check if server slug already exists within this chain
+    // Slugs are unique per chain, not globally
+    const slugExistsInChain = await dynamoDBService.slugExistsInChain(finalServerSlug, chainId)
+    if (slugExistsInChain) {
       return res.status(409).json({
         error: "Server slug already taken",
-        message: `The slug "${finalServerSlug}" is already registered. Please choose a different slug.`
+        message: `The slug "${finalServerSlug}" is already registered on ${chainConfig?.name || chainId}. Please choose a different slug.`
       })
     }
 
@@ -996,19 +1088,24 @@ app.post('/api/register', async (req, res) => {
       })
     }
 
-    // Create token entry
+    // Create token entry with chain-aware address normalization
+    // EVM addresses are lowercased, Solana addresses keep original case (base58 is case-sensitive)
+    const normalizeAddress = (addr: string) => chainType === 'evm' ? addr.toLowerCase() : addr
+
     const tokenEntry: IAOTokenDBEntry = {
-      id: tokenAddress.toLowerCase(),
+      id: normalizeAddress(tokenAddress),
       slug: finalServerSlug,
       name,
       symbol,
       apis: apiEntries,
-      builder: builder.toLowerCase(),
-      paymentToken: paymentToken.toLowerCase(),
+      builder: normalizeAddress(builder),
+      paymentToken: normalizeAddress(paymentToken),
       subscriptionCount: "0",
       refundCount: "0",
       fulfilledCount: "0",
       tags: validatedTags.length > 0 ? validatedTags : undefined,
+      chainId: chainId,
+      chainType: chainType,
       createdAt: now,
       updatedAt: now,
     }
@@ -1278,7 +1375,132 @@ app.get('/api/server/:slug', async (req, res) => {
 })
 
 /**
+ * GET /api/chains - Get all enabled blockchain configurations
+ * Returns chain configs for frontend chain selector
+ */
+app.get('/api/chains', async (req, res) => {
+  try {
+    if (!chainConfigService) {
+      return res.status(503).json({
+        error: "Chain config service not configured",
+        message: "Chain configuration service is not available"
+      })
+    }
+
+    const includeDisabled = req.query.includeDisabled === 'true'
+    const chains = includeDisabled
+      ? await chainConfigService.getAllChains()
+      : await chainConfigService.getAllEnabledChains()
+
+    // Return only fields needed by frontend
+    const chainList = chains.map(chain => ({
+      chainId: chain.chainId,
+      chainType: chain.chainType,
+      name: chain.name,
+      shortName: chain.shortName,
+      paymentTokenSymbol: chain.paymentTokenSymbol,
+      explorerUrl: chain.explorerUrl,
+      enabled: chain.enabled,
+    }))
+
+    return res.status(200).json({
+      success: true,
+      count: chainList.length,
+      chains: chainList
+    })
+  } catch (error: any) {
+    console.error("Error fetching chains:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch chains"
+    })
+  }
+})
+
+/**
+ * GET /api/chain/:chainId - Get a specific chain configuration
+ */
+app.get('/api/chain/:chainId', async (req, res) => {
+  try {
+    if (!chainConfigService) {
+      return res.status(503).json({
+        error: "Chain config service not configured",
+        message: "Chain configuration service is not available"
+      })
+    }
+
+    const { chainId } = req.params
+    const chain = await chainConfigService.getChainConfig(chainId)
+
+    if (!chain) {
+      return res.status(404).json({
+        error: "Chain not found",
+        message: `Chain with ID ${chainId} not found`
+      })
+    }
+
+    return res.status(200).json({
+      success: true,
+      chain: {
+        chainId: chain.chainId,
+        chainType: chain.chainType,
+        name: chain.name,
+        shortName: chain.shortName,
+        factoryAddress: chain.factoryAddress,
+        paymentTokenAddress: chain.paymentTokenAddress,
+        paymentTokenSymbol: chain.paymentTokenSymbol,
+        paymentTokenDecimals: chain.paymentTokenDecimals,
+        rpcUrl: chain.rpcUrl,
+        explorerUrl: chain.explorerUrl,
+        enabled: chain.enabled,
+      }
+    })
+  } catch (error: any) {
+    console.error("Error fetching chain:", error)
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message || "Failed to fetch chain"
+    })
+  }
+})
+
+/**
+ * POST /api/admin/backfill-chain-data - Backfill chainId/chainType for existing tokens
+ * Admin endpoint to migrate existing data to multi-chain schema
+ */
+app.post('/api/admin/backfill-chain-data', async (req, res) => {
+  try {
+    if (!dynamoDBService) {
+      return res.status(503).json({
+        error: "DynamoDB not configured",
+        message: "DynamoDB service is not available"
+      })
+    }
+
+    const { chainId = "84532", chainType = "evm" } = req.body
+
+    console.log(`🔄 Starting chain data backfill (chainId: ${chainId}, chainType: ${chainType})...`)
+    const updatedCount = await dynamoDBService.backfillChainData(chainId, chainType as ChainType)
+
+    return res.status(200).json({
+      success: true,
+      message: `Backfill complete`,
+      updatedCount,
+      chainId,
+      chainType
+    })
+  } catch (error: any) {
+    console.error("Error during backfill:", error)
+    return res.status(500).json({
+      error: "Backfill failed",
+      message: error.message || "Failed to backfill chain data"
+    })
+  }
+})
+
+/**
  * GET /api/servers - Get all registered servers
+ * Supports optional chainId query parameter for filtering by chain
  * Returns all servers from DynamoDB
  */
 app.get('/api/servers', async (req, res) => {
@@ -1290,7 +1512,12 @@ app.get('/api/servers', async (req, res) => {
       })
     }
 
-    const tokens = await dynamoDBService.scanAllItems()
+    // Support chain filtering via query parameter
+    const chainId = req.query.chainId as string | undefined
+    const tokens = chainId
+      ? await dynamoDBService.scanItemsByChain(chainId)
+      : await dynamoDBService.scanAllItems()
+
     // Sanitize tokens to hide builder endpoints
     const sanitizedServers = tokens.map(token => ({
       id: token.id,
@@ -1303,12 +1530,15 @@ app.get('/api/servers', async (req, res) => {
       tags: token.tags || [],
       apis: token.apis ? sanitizeApisForPublic(token.apis) : [],
       apiCount: token.apis?.length || 0,
+      chainId: token.chainId || "84532", // Default to Base Sepolia for legacy data
+      chainType: token.chainType || "evm",
       createdAt: token.createdAt,
       updatedAt: token.updatedAt,
     }))
     return res.status(200).json({
       success: true,
       count: sanitizedServers.length,
+      chainId: chainId || "all",
       servers: sanitizedServers
     })
   } catch (error: any) {
@@ -1694,7 +1924,7 @@ app.head('/api/:serverSlug/:apiSlug', async (req, res) => {
 async function handleApiProxyRequest(req: any, res: any, serverSlug: string, apiSlug: string) {
   let tokenEntry: IAOTokenEntry | null = null
   let requestStartTime = Date.now()
-  
+
   try {
     // Query DynamoDB for server by slug
     tokenEntry = await getIAOTokenEntryBySlug(serverSlug)
@@ -1704,6 +1934,15 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
         error: "Server not found",
         message: `No server registered with slug "${serverSlug}"`
       })
+    }
+
+    // Get chain configuration for this server
+    const serverChainId = (tokenEntry as any).chainId || "84532" // Default to Base Sepolia
+    const serverChainType = (tokenEntry as any).chainType || "evm" as ChainType
+    let chainConfig: ChainConfigEntry | null = null
+
+    if (chainConfigService) {
+      chainConfig = await chainConfigService.getChainConfig(serverChainId)
     }
 
     // Get the specific API by slug
@@ -1727,71 +1966,97 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     const priceString = `$${subscriptionFeeUSD.toFixed(2)}`
 
     // Check if payment is required
-    if (thirdwebClient) {
+    if (thirdwebClient || multiChainPaymentService?.isInitialized()) {
+      // Determine network string based on chain type (CAIP-2 format)
+      const networkString = serverChainType === 'solana'
+        ? 'solana:devnet'  // Solana Devnet CAIP-2
+        : `eip155:${baseSepolia.id}`  // EVM CAIP-2
+
       if (!paymentData) {
         // No payment data provided - return 402 with payment requirements
         // IMPORTANT: User pays to FACILITATOR, facilitator forwards to token
         const facilitatorAddress = process.env.THIRDWEB_SERVER_WALLET_ADDRESS
-        
-        console.log('💰 Returning 402 Payment Required:', {
+
+        console.log(`💰 [${serverChainType.toUpperCase()}] Returning 402 Payment Required:`, {
           payTo: facilitatorAddress,
           finalRecipient: tokenEntry.id,
           asset: tokenEntry.paymentToken,
           amount: api.fee,
+          chainId: serverChainId,
+          chainType: serverChainType,
           serverSlug,
           apiSlug,
           timestamp: new Date().toISOString()
         })
-        
+
         return res.status(402).json({
           error: "Payment required",
           message: "This endpoint requires payment. Please provide PAYMENT-SIGNATURE header (x402 V2).",
           x402Version: 2,
           accepts: [{
             scheme: "exact",
-            network: `eip155:${baseSepolia.id}`, // CAIP-2 format (V2)
+            network: networkString,
             payTo: facilitatorAddress,  // User pays to FACILITATOR
             asset: tokenEntry.paymentToken,
             maxAmountRequired: api.fee,
           }],
-          // Include final recipient for reference
+          // Include chain and recipient info for reference
+          chainId: serverChainId,
+          chainType: serverChainType,
+          chainName: chainConfig?.name || serverChainId,
           finalRecipient: tokenEntry.id,
           serverSlug: serverSlug,
           apiSlug: apiSlug,
         })
       }
-      
+
       // Verify payment authorization BEFORE calling builder
       // User should have signed payment to facilitator address
       const facilitatorAddress = process.env.THIRDWEB_SERVER_WALLET_ADDRESS!
-      
-      console.log("📝 Verifying payment authorization...")
-      const verifyResult = await verifyPaymentAuthorization(
-        paymentData,
-        facilitatorAddress,
-        api.fee, // Use API-specific fee
-        tokenEntry.paymentToken
-      )
-      
+
+      console.log(`📝 [${serverChainType.toUpperCase()}] Verifying payment authorization...`)
+
+      // Use MultiChainPaymentService for chain-aware verification
+      let verifyResult: { valid: boolean; userAddress?: string; error?: string }
+
+      if (multiChainPaymentService) {
+        verifyResult = multiChainPaymentService.verifyPaymentAuthorization(
+          paymentData,
+          facilitatorAddress,
+          api.fee,
+          serverChainType
+        )
+      } else {
+        // Fallback to original EVM-only verification
+        verifyResult = await verifyPaymentAuthorization(
+          paymentData,
+          facilitatorAddress,
+          api.fee,
+          tokenEntry.paymentToken
+        )
+      }
+
       if (!verifyResult.valid) {
-        console.error("❌ Payment authorization invalid:", verifyResult.error)
+        console.error(`❌ [${serverChainType.toUpperCase()}] Payment authorization invalid:`, verifyResult.error)
         return res.status(402).json({
           error: "Invalid payment authorization",
           message: verifyResult.error || "Payment authorization is invalid",
           x402Version: 2,
           accepts: [{
             scheme: "exact",
-            network: `eip155:${baseSepolia.id}`, // CAIP-2 format (V2)
-            payTo: tokenEntry.id,
+            network: networkString,
+            payTo: facilitatorAddress,
             asset: tokenEntry.paymentToken,
             maxAmountRequired: api.fee,
           }],
+          chainId: serverChainId,
+          chainType: serverChainType,
         })
       }
-      
-      console.log("✅ Payment authorization valid - will execute AFTER successful builder response")
+
+      console.log(`✅ [${serverChainType.toUpperCase()}] Payment authorization valid - will execute AFTER successful builder response`)
     } else {
-      console.warn("⚠️  Thirdweb client not configured - skipping payment verification")
+      console.warn("⚠️  Payment service not configured - skipping payment verification")
     }
 
     // STEP 1: Forward request to builder endpoint FIRST (before settling payment)
@@ -2038,28 +2303,48 @@ async function handleApiProxyRequest(req: any, res: any, serverSlug: string, api
     }
 
     // STEP 3: Builder succeeded - NOW execute the payment
-    console.log("✅ Builder returned success - NOW executing payment to token address")
-    
-    if (thirdwebClient && paymentData) {
+    console.log(`✅ [${serverChainType.toUpperCase()}] Builder returned success - NOW executing payment to token address`)
+
+    if ((thirdwebClient || multiChainPaymentService?.isInitialized()) && paymentData) {
       try {
-        console.log("Executing payment transfer:", {
+        console.log(`[${serverChainType.toUpperCase()}] Executing payment transfer:`, {
           payTo: tokenEntry.id,
           amount: api.fee, // Use API-specific fee
           paymentToken: tokenEntry.paymentToken,
+          chainId: serverChainId,
+          chainType: serverChainType,
           serverSlug,
           apiSlug,
         })
-        
-        const paymentResult = await executePaymentTransfer(
-          paymentData,
-          tokenEntry.paymentToken,
-          req,
-          tokenEntry.id,
-          api.fee, // Use API-specific fee
-          serverSlug,
-          apiSlug,
-          api.name
-        )
+
+        // Use MultiChainPaymentService for chain-aware execution
+        let paymentResult: { success: boolean; txHash?: string; error?: string; paymentReceipt?: any }
+
+        if (multiChainPaymentService) {
+          paymentResult = await multiChainPaymentService.executePaymentTransfer(
+            paymentData,
+            req,
+            tokenEntry.id,
+            api.fee,
+            serverSlug,
+            apiSlug,
+            api.name,
+            serverChainType,
+            chainConfig || undefined
+          )
+        } else {
+          // Fallback to original EVM-only execution
+          paymentResult = await executePaymentTransfer(
+            paymentData,
+            tokenEntry.paymentToken,
+            req,
+            tokenEntry.id,
+            api.fee,
+            serverSlug,
+            apiSlug,
+            api.name
+          )
+        }
         
         if (!paymentResult.success) {
           console.error("❌ Payment execution failed AFTER successful builder response")
@@ -2467,7 +2752,7 @@ app.post('/api/chat/sessions', async (req, res) => {
       return res.status(503).json({ error: "Chat service not initialized" })
     }
 
-    const { agentId, userAddress } = req.body
+    const { agentId, userAddress, forceNew } = req.body
 
     if (!agentId || !userAddress) {
       return res.status(400).json({
@@ -2476,7 +2761,13 @@ app.post('/api/chat/sessions', async (req, res) => {
       })
     }
 
-    const session = await chatSessionService.getOrCreateSession(agentId, userAddress)
+    let session
+    if (forceNew) {
+      // Force create a new session (for "New Chat" button)
+      session = await chatSessionService.createNewSession(agentId, userAddress)
+    } else {
+      session = await chatSessionService.getOrCreateSession(agentId, userAddress)
+    }
 
     return res.status(201).json({
       success: true,
@@ -2486,6 +2777,41 @@ app.post('/api/chat/sessions', async (req, res) => {
     console.error("Error creating chat session:", error)
     return res.status(500).json({
       error: "Failed to create chat session",
+      message: error.message
+    })
+  }
+})
+
+// GET /api/chat/sessions/user/:userAddress - Get all sessions for a user (optionally filtered by agent)
+app.get('/api/chat/sessions/user/:userAddress', async (req, res) => {
+  try {
+    if (!chatSessionService) {
+      return res.status(503).json({ error: "Chat service not initialized" })
+    }
+
+    const { userAddress } = req.params
+    const { agentId } = req.query
+
+    const sessions = await chatSessionService.getUserSessions(userAddress)
+
+    // Filter by agent if specified
+    const filteredSessions = agentId
+      ? sessions.filter(s => s.agentId === agentId)
+      : sessions
+
+    // Sort by lastMessageAt descending (most recent first)
+    filteredSessions.sort((a, b) =>
+      new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+    )
+
+    return res.status(200).json({
+      success: true,
+      data: filteredSessions
+    })
+  } catch (error: any) {
+    console.error("Error getting user sessions:", error)
+    return res.status(500).json({
+      error: "Failed to get user sessions",
       message: error.message
     })
   }
@@ -2549,6 +2875,180 @@ app.post('/api/chat/message', async (req, res) => {
       error: "Failed to save message",
       message: error.message
     })
+  }
+})
+
+// POST /api/chat/playground - Ephemeral chat without session persistence
+app.post('/api/chat/playground', async (req, res) => {
+  try {
+    const { message, model, tools: toolIds, conversationHistory, userAddress } = req.body
+
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" })
+    }
+
+    if (!toolIds || toolIds.length === 0) {
+      return res.status(400).json({ error: "At least one tool is required for playground chat" })
+    }
+
+    if (!llmService || !agentToolService) {
+      return res.status(503).json({ error: "Required services not initialized" })
+    }
+
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders()
+
+    const sendEvent = (type: string, data: any) => {
+      res.write(`data: ${JSON.stringify({ type, data })}\n\n`)
+    }
+
+    // Build tools from toolIds (format: "serverSlug/apiSlug")
+    const servers = await agentToolService.fetchAvailableServers()
+    const tools: any[] = []
+
+    for (const toolId of toolIds) {
+      const [serverSlug, apiSlug] = toolId.split('/')
+      const server = servers.find((s: any) => s.slug.toLowerCase() === serverSlug.toLowerCase())
+      if (!server) continue
+
+      const api = server.apis?.find((a: any) => a.slug.toLowerCase() === apiSlug.toLowerCase())
+      if (!api) continue
+
+      const toolName = `call_${serverSlug}_${apiSlug}`.replace(/-/g, '_').toLowerCase()
+      tools.push({
+        name: toolName,
+        description: `${api.name || api.slug} - ${api.description || 'No description'}. Fee: ${api.fee} wei`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Query parameters for the API call (e.g., "base=USD" or "latitude=52.52&longitude=13.41")'
+            }
+          },
+          required: []
+        }
+      })
+    }
+
+    if (tools.length === 0) {
+      sendEvent('error', { message: 'No valid tools found for the selected APIs' })
+      res.end()
+      return
+    }
+
+    // Build conversation for LLM
+    const llmMessages = [
+      ...(conversationHistory || []).map((m: any) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content
+      })),
+      { role: 'user' as const, content: message }
+    ]
+
+    // System prompt for playground
+    const systemPrompt = `You are a helpful AI assistant in a playground environment. You have access to the following APIs:
+
+${tools.map(t => `• ${t.name.replace('call_', '').replace(/_/g, ' ')}: ${t.description}`).join('\n')}
+
+When users ask questions that your APIs can help with, use the appropriate tool to fetch data.
+Be helpful, conversational, and explain your answers clearly.`
+
+    console.log(`🎮 Playground: Processing message with ${tools.length} tools`)
+
+    // Create mock agent for tool execution
+    const mockAgent = {
+      id: 'playground',
+      name: 'Playground',
+      description: 'Playground agent',
+      creator: userAddress || 'anonymous',
+      llmProvider: model || 'claude',
+      availableTools: toolIds,
+      starterPrompts: [],
+      isPublic: false,
+      totalMessages: 0,
+      totalUsers: 0,
+      totalToolCalls: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+
+    // Agentic loop - max 5 iterations
+    let currentMessages = llmMessages
+    let iterationCount = 0
+    const maxIterations = 5
+
+    while (iterationCount < maxIterations) {
+      iterationCount++
+
+      // Use the async generator to stream responses
+      let responseContent = ''
+      const collectedToolCalls: any[] = []
+
+      for await (const chunk of llmService.streamChat(
+        (model as 'claude' | 'gpt' | 'gemini') || 'claude',
+        currentMessages,
+        tools,
+        systemPrompt
+      )) {
+        if (chunk.type === 'token') {
+          responseContent += chunk.content
+          sendEvent('token', { content: chunk.content })
+        } else if (chunk.type === 'tool_call') {
+          collectedToolCalls.push(chunk.tool)
+          sendEvent('tool_call', {
+            name: chunk.tool.name,
+            input: chunk.tool.input,
+            description: chunk.tool.name.replace('call_', '').replace(/_/g, ' ')
+          })
+        }
+      }
+
+      // If no tool calls, we're done
+      if (collectedToolCalls.length === 0) {
+        break
+      }
+
+      // Execute tool calls
+      const toolResults = await agentToolService.executeTools(collectedToolCalls, mockAgent as any)
+
+      // Send tool results
+      for (const result of toolResults) {
+        sendEvent('tool_result', {
+          toolName: result.toolName,
+          success: result.success,
+          result: result.result,
+          error: result.error
+        })
+      }
+
+      // Add assistant message with tool use and results to conversation
+      currentMessages = [
+        ...currentMessages,
+        {
+          role: 'assistant' as const,
+          content: responseContent || ''
+        },
+        {
+          role: 'user' as const,
+          content: `Tool results:\n${agentToolService.formatToolResults(toolResults)}`
+        }
+      ]
+    }
+
+    sendEvent('done', {})
+    res.end()
+  } catch (error: any) {
+    console.error('Playground chat error:', error)
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'error', data: { message: error.message } })}\n\n`)
+      res.end()
+    } catch {
+      // Response already ended
+    }
   }
 })
 
