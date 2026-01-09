@@ -49,9 +49,9 @@ export class ChatSessionService {
     const config: any = { region }
 
     // Use local DynamoDB endpoint if configured (for development/testing)
-    if (process.env.DYNAMODB_ENDPOINT) {
-      config.endpoint = process.env.DYNAMODB_ENDPOINT
-    }
+    // if (process.env.DYNAMODB_ENDPOINT) {
+    //   config.endpoint = process.env.DYNAMODB_ENDPOINT
+    // }
 
     const client = new DynamoDBClient(config)
     this.docClient = DynamoDBDocumentClient.from(client)
@@ -106,47 +106,6 @@ export class ChatSessionService {
     } catch (error) {
       console.error(
         `❌ Failed to get or create session for agent ${agentId}, user ${userAddressLower}:`,
-        error
-      )
-      throw error
-    }
-  }
-
-  /**
-   * Force create a new session (for "New Chat" button)
-   * Always creates a new session regardless of existing ones
-   */
-  async createNewSession(
-    agentId: string,
-    userAddress: string
-  ): Promise<ChatSession> {
-    const userAddressLower = userAddress.toLowerCase()
-
-    try {
-      const now = new Date().toISOString()
-      const session: ChatSession = {
-        id: uuidv4(),
-        agentId,
-        userAddress: userAddressLower,
-        messageCount: 0,
-        lastMessageAt: now,
-        createdAt: now,
-      }
-
-      await this.docClient.send(
-        new PutCommand({
-          TableName: this.sessionsTableName,
-          Item: session,
-        })
-      )
-
-      console.log(
-        `✅ Force created new session: ${session.id} (agent: ${agentId}, user: ${userAddressLower})`
-      )
-      return session
-    } catch (error) {
-      console.error(
-        `❌ Failed to create new session for agent ${agentId}, user ${userAddressLower}:`,
         error
       )
       throw error
