@@ -2681,20 +2681,19 @@ app.post('/api/chat/playground', async (req, res) => {
       { role: 'user' as const, content: message }
     ]
 
-    // System prompt for playground - be very direct about tool availability
-    const systemPrompt = `You are a helpful AI assistant in a playground environment testing decentralized APIs.
+    // System prompt for playground - concise and direct
+    const systemPrompt = `You are a helpful AI assistant testing decentralized APIs.
 
-IMPORTANT: You have WORKING access to the following tools. These APIs are AVAILABLE and ACTIVE - use them when relevant:
+You have access to these tools:
+${tools.map(t => `- ${t.name.replace('call_', '').replace(/_/g, ' ')}`).join('\n')}
 
-${tools.map(t => `- ${t.name}: ${t.description}`).join('\n')}
-
-INSTRUCTIONS:
-1. When users ask about data these APIs can provide, USE THE TOOLS to fetch real data
-2. Do NOT say the APIs are "unavailable" or "not working" - they ARE available
-3. If a tool call fails, report the actual error, don't assume the API doesn't exist
-4. Be helpful and conversational while demonstrating the APIs
-
-Example: If user asks about games and you have a games API tool, CALL IT to get real data.`
+RULES:
+1. When users ask for data, CALL the appropriate tool immediately - don't explain what you'll do, just do it
+2. Keep responses SHORT and conversational - no lengthy explanations
+3. NEVER output raw XML, JSON, or function definitions to the user
+4. NEVER list tools with their technical names or schemas
+5. If a tool fails with 402 error, briefly explain the API requires payment
+6. Be natural - respond like a helpful assistant, not a technical manual`
 
     console.log(`🎮 Playground: Processing message with ${tools.length} tools`)
     console.log(`🔧 Tools passed to LLM:`, tools.map(t => t.name))
