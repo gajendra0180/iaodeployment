@@ -2604,117 +2604,6 @@ app.post('/api/chat/message', async (req, res) => {
   }
 })
 
-// Generate mock responses for playground testing
-function generateMockResponse(apiSlug: string, input?: any): any {
-  const slug = apiSlug.toLowerCase()
-
-  // Games related
-  if (slug.includes('game')) {
-    return {
-      _mock: true,
-      games: [
-        { id: 1, name: "Cyber Quest 2077", genre: "RPG", rating: 4.8, players: "125K" },
-        { id: 2, name: "Space Warriors", genre: "Action", rating: 4.5, players: "89K" },
-        { id: 3, name: "Puzzle Master", genre: "Puzzle", rating: 4.9, players: "200K" },
-        { id: 4, name: "Racing Legends", genre: "Racing", rating: 4.3, players: "67K" },
-        { id: 5, name: "Fantasy Kingdom", genre: "Strategy", rating: 4.7, players: "150K" }
-      ],
-      total: 5
-    }
-  }
-
-  // GitHub/Users related
-  if (slug.includes('github') || slug.includes('user')) {
-    return {
-      _mock: true,
-      users: [
-        { login: "octocat", id: 583231, type: "User", public_repos: 8 },
-        { login: "torvalds", id: 1024025, type: "User", public_repos: 6 },
-        { login: "gaearon", id: 810438, type: "User", public_repos: 95 }
-      ]
-    }
-  }
-
-  // Currency/Exchange related
-  if (slug.includes('currency') || slug.includes('exchange') || slug.includes('convert')) {
-    const base = input?.query?.match(/base=(\w+)/)?.[1] || 'USD'
-    return {
-      _mock: true,
-      base: base,
-      date: new Date().toISOString().split('T')[0],
-      rates: {
-        EUR: 0.92,
-        GBP: 0.79,
-        JPY: 149.50,
-        CAD: 1.36,
-        AUD: 1.53
-      }
-    }
-  }
-
-  // Weather related
-  if (slug.includes('weather') || slug.includes('forecast')) {
-    return {
-      _mock: true,
-      location: "San Francisco, CA",
-      temperature: 68,
-      unit: "F",
-      condition: "Partly Cloudy",
-      humidity: 65,
-      wind: "12 mph NW"
-    }
-  }
-
-  // Hype/Stats related
-  if (slug.includes('hype') || slug.includes('stats') || slug.includes('metrics')) {
-    return {
-      _mock: true,
-      totalHype: 1250000,
-      activeUsers: 45000,
-      dailyTransactions: 12500,
-      trending: ["DeFi", "Gaming", "NFTs"]
-    }
-  }
-
-  // Referral related
-  if (slug.includes('referral') || slug.includes('key')) {
-    return {
-      _mock: true,
-      referralCode: "PLAY-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
-      bonus: "10%",
-      validUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
-    }
-  }
-
-  // Price/Market related
-  if (slug.includes('price') || slug.includes('market') || slug.includes('crypto')) {
-    return {
-      _mock: true,
-      assets: [
-        { symbol: "BTC", price: 67500.00, change24h: 2.5 },
-        { symbol: "ETH", price: 3450.00, change24h: 1.8 },
-        { symbol: "SOL", price: 145.00, change24h: 4.2 }
-      ]
-    }
-  }
-
-  // Default generic response
-  return {
-    _mock: true,
-    message: "Mock data for playground testing",
-    apiSlug: apiSlug,
-    timestamp: new Date().toISOString(),
-    data: {
-      status: "success",
-      items: [
-        { id: 1, name: "Sample Item 1", value: 100 },
-        { id: 2, name: "Sample Item 2", value: 200 },
-        { id: 3, name: "Sample Item 3", value: 300 }
-      ]
-    }
-  }
-}
-
 // POST /api/chat/playground - Ephemeral chat without session persistence
 app.post('/api/chat/playground', async (req, res) => {
   try {
@@ -2862,63 +2751,47 @@ RULES:
         break
       }
 
-      // Execute tool calls using the slug mapping (not parsing tool names)
-      const toolResults: Array<{ toolName: string; success: boolean; result?: any; error?: string }> = []
-
+      // For playground, send payment_option events and let frontend handle payment
+      // This matches how agent chat works - requires user to pay for API access
       for (const toolCall of collectedToolCalls) {
         const slugs = toolNameToSlugs[toolCall.name.toLowerCase()]
         if (!slugs) {
-          toolResults.push({
-            toolName: toolCall.name,
-            success: false,
-            error: `Unknown tool: ${toolCall.name}`
-          })
+          sendEvent('error', { message: `Unknown tool: ${toolCall.name}` })
           continue
         }
 
         const { serverSlug, apiSlug } = slugs
-        console.log(`🔧 Executing playground tool (MOCK): ${toolCall.name} -> ${serverSlug}/${apiSlug}`)
+        console.log(`💳 Playground: Sending payment option for ${toolCall.name} -> ${serverSlug}/${apiSlug}`)
 
-        // Generate mock response based on API type
-        const mockResult = generateMockResponse(apiSlug, toolCall.input)
-        toolResults.push({
-          toolName: toolCall.name,
-          success: true,
-          result: mockResult
-        })
+        try {
+          // Get API info for payment option
+          const apiInfo = await agentToolService.getApiInfo(serverSlug, apiSlug)
+
+          // Send payment option event to frontend (same format as agent chat)
+          sendEvent('payment_option', {
+            toolName: toolCall.name,
+            toolDisplayName: apiInfo.name,
+            serverSlug,
+            apiSlug,
+            fee: apiInfo.fee,
+            displayFee: AgentPaymentService.formatFeeForDisplay(apiInfo.fee),
+            tokenAddress: apiInfo.tokenAddress,
+            description: apiInfo.description,
+            input: toolCall.input // Include the tool input so frontend can use it
+          })
+
+          console.log(`💳 Payment option sent for ${toolCall.name}: ${apiInfo.name} (${AgentPaymentService.formatFeeForDisplay(apiInfo.fee)})`)
+        } catch (error: any) {
+          console.error(`Failed to get API info for ${toolCall.name}:`, error)
+          sendEvent('error', { message: `Failed to get API info for ${toolCall.name}` })
+        }
       }
 
-      // Send tool results
-      for (const result of toolResults) {
-        sendEvent('tool_result', {
-          toolName: result.toolName,
-          success: result.success,
-          result: result.result,
-          error: result.error
-        })
-      }
-
-      // Format tool results for LLM
-      const formattedResults = toolResults.map(r => {
-        if (r.success) {
-          return `✅ ${r.toolName}:\n${JSON.stringify(r.result, null, 2)}`
-        } else {
-          return `❌ ${r.toolName}: ${r.error}`
-        }
-      }).join('\n\n')
-
-      // Add assistant message with tool use and results to conversation
-      currentMessages = [
-        ...currentMessages,
-        {
-          role: 'assistant' as const,
-          content: responseContent || ''
-        },
-        {
-          role: 'user' as const,
-          content: `Tool results:\n${formattedResults}`
-        }
-      ]
+      // After sending payment options, end the stream
+      // Frontend will handle payment and submit results as new messages
+      sendEvent('done', { pendingPayments: true })
+      res.end()
+      return
     }
 
     sendEvent('done', {})
