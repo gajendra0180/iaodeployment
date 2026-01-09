@@ -2675,15 +2675,23 @@ app.post('/api/chat/playground', async (req, res) => {
       { role: 'user' as const, content: message }
     ]
 
-    // System prompt for playground
-    const systemPrompt = `You are a helpful AI assistant in a playground environment. You have access to the following APIs:
+    // System prompt for playground - be very direct about tool availability
+    const systemPrompt = `You are a helpful AI assistant in a playground environment testing decentralized APIs.
 
-${tools.map(t => `• ${t.name.replace('call_', '').replace(/_/g, ' ')}: ${t.description}`).join('\n')}
+IMPORTANT: You have WORKING access to the following tools. These APIs are AVAILABLE and ACTIVE - use them when relevant:
 
-When users ask questions that your APIs can help with, use the appropriate tool to fetch data.
-Be helpful, conversational, and explain your answers clearly.`
+${tools.map(t => `- ${t.name}: ${t.description}`).join('\n')}
+
+INSTRUCTIONS:
+1. When users ask about data these APIs can provide, USE THE TOOLS to fetch real data
+2. Do NOT say the APIs are "unavailable" or "not working" - they ARE available
+3. If a tool call fails, report the actual error, don't assume the API doesn't exist
+4. Be helpful and conversational while demonstrating the APIs
+
+Example: If user asks about games and you have a games API tool, CALL IT to get real data.`
 
     console.log(`🎮 Playground: Processing message with ${tools.length} tools`)
+    console.log(`🔧 Tools passed to LLM:`, tools.map(t => t.name))
 
     // Create mock agent for tool execution
     const mockAgent = {
