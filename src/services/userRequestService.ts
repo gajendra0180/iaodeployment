@@ -7,8 +7,8 @@ let dynamoDBDocClient: DynamoDBDocumentClient | null = null;
 function getDynamoDBClient(region: string): DynamoDBClient {
   if (!dynamoDBClient) {
     dynamoDBClient = new DynamoDBClient({
-      region,
-      endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
+      region
+      // endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
     });
   }
   return dynamoDBClient;
@@ -38,6 +38,7 @@ export interface RequestQueueDBEntry {
   from: string; // User address (lowercase)
   userRequestNumber: string; // BigInt as string
   globalRequestNumber: string; // BigInt as string
+  fee: string; // Fee paid by user in payment token wei (e.g., "10000" for $0.01)
   createdAt: string; // ISO timestamp
 }
 
@@ -99,7 +100,8 @@ class UserRequestService {
   async createRequestQueueEntry(
     iaoToken: string,
     from: string,
-    globalRequestNumber: string
+    globalRequestNumber: string,
+    fee: string
   ): Promise<RequestQueueDBEntry> {
     try {
       // Get or create user request
@@ -128,6 +130,7 @@ class UserRequestService {
         from: from.toLowerCase(),
         userRequestNumber,
         globalRequestNumber,
+        fee,
         createdAt: new Date().toISOString(),
       };
 
@@ -136,7 +139,7 @@ class UserRequestService {
         Item: requestQueueEntry,
       }));
 
-      console.log(`✅ Created RequestQueue entry: ${queueId} (globalRequestNumber: ${globalRequestNumber})`);
+      console.log(`✅ Created RequestQueue entry: ${queueId} (globalRequestNumber: ${globalRequestNumber}, fee: ${fee})`);
       return requestQueueEntry;
     } catch (err) {
       console.error(`❌ DynamoDB createRequestQueueEntry fail:`, err);
@@ -206,6 +209,28 @@ class UserRequestService {
       return items;
     } catch (err) {
       console.error(`❌ DynamoDB scanAllRequestQueue fail:`, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Get recent transactions (request queue entries) sorted by createdAt descending
+   * @param limit - Maximum number of transactions to return (default: 20)
+   */
+  async getRecentTransactions(limit: number = 20): Promise<RequestQueueDBEntry[]> {
+    try {
+      // Scan all and sort (Note: For production with large datasets, consider using DynamoDB Streams or a GSI with sort key)
+      const allTransactions = await this.scanAllRequestQueue();
+      
+      // Sort by createdAt descending (most recent first)
+      allTransactions.sort((a, b) => {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+
+      // Return limited results
+      return allTransactions.slice(0, limit);
+    } catch (err) {
+      console.error(`❌ Failed to get recent transactions:`, err);
       throw err;
     }
   }
