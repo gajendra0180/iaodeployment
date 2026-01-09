@@ -2772,6 +2772,10 @@ app.get('/api/chat/stream/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params
 
+    // Get optional tool/model overrides from query params
+    const toolsOverride = req.query.tools ? (req.query.tools as string).split(',') : null
+    const modelOverride = req.query.model as string | null
+
     // Validate services
     if (!chatSessionService || !agentService || !llmService || !agentToolService || !agentPaymentService) {
       return res.status(503).json({ error: "Required services not initialized" })
@@ -2817,9 +2821,13 @@ app.get('/api/chat/stream/:sessionId', async (req, res) => {
         content: msg.content
       }))
 
+    // Determine effective model (use override if provided)
+    const effectiveModel = modelOverride || agent.llmProvider
+    console.log(`🤖 Using model: ${effectiveModel}${modelOverride ? ' (overridden from frontend)' : ''}`)
+
     // For Haiku (8k context), limit to last 15 messages to avoid token overflow
     // System prompt + tools + many messages can exceed context window
-    if (agent.llmProvider === 'claude' && llmMessages.length > 15) {
+    if (effectiveModel === 'claude' && llmMessages.length > 15) {
       console.warn(`⚠️  Truncating ${llmMessages.length} messages to 15 for Haiku token limit`)
       llmMessages = llmMessages.slice(-15)
     }
@@ -2830,10 +2838,51 @@ app.get('/api/chat/stream/:sessionId', async (req, res) => {
     const lastMessage = messages[messages.length - 1]
     const isPaymentResult = lastMessage?.content?.includes('Payment successful!')
 
-    // Step 4: Get tools for this agent
-    let tools = []
+    // Step 4: Get tools - use override if provided, otherwise use agent's default tools
+    let tools: any[] = []
     try {
-      tools = await agentToolService.getToolsForAgent(agent)
+      if (toolsOverride && toolsOverride.length > 0) {
+        // Use overridden tools from query params
+        console.log(`🔧 Using tool overrides from frontend: ${toolsOverride.join(', ')}`)
+        const servers = await agentToolService.fetchAvailableServers()
+
+        for (const toolId of toolsOverride) {
+          const [serverSlug, apiSlug] = toolId.split('/')
+          if (!serverSlug || !apiSlug) continue
+
+          const server = servers.find((s: any) => s.slug.toLowerCase() === serverSlug.toLowerCase())
+          if (!server) continue
+
+          const api = server.apis?.find((a: any) => a.slug.toLowerCase() === apiSlug.toLowerCase())
+          if (!api) continue
+
+          const toolName = `call_${serverSlug}_${apiSlug}`.replace(/-/g, '_').toLowerCase()
+          tools.push({
+            name: toolName,
+            description: `${api.name || api.slug} - ${api.description || 'No description'}. Server: ${server.name}. Fee: ${api.fee} wei`,
+            input_schema: {
+              type: 'object',
+              properties: {
+                query: {
+                  type: 'string',
+                  description: 'Query parameters for the API call (e.g., "base=USD" or "latitude=52.52&longitude=13.41")'
+                }
+              },
+              required: []
+            },
+            // Store metadata for payment/execution
+            _meta: {
+              serverSlug: server.slug,
+              apiSlug: api.slug,
+              fee: api.fee,
+              tokenAddress: server.id  // server.id is the token address
+            }
+          })
+        }
+      } else {
+        // Use agent's default tools
+        tools = await agentToolService.getToolsForAgent(agent)
+      }
     } catch (error) {
       console.warn("Failed to load tools:", error)
       sendEvent('warning', { message: 'Failed to load agent tools' })
@@ -2937,8 +2986,8 @@ Remember: Be friendly in greetings/small talk, but redirect non-API questions to
       console.log(`📝 System prompt length: ${systemPrompt.length} chars, ${Math.ceil(systemPrompt.length / 4)} tokens (estimated)`)
       console.log(`🔧 Tools count: ${tools.length}`)
 
-      // Stream the LLM response
-      for await (const chunk of llmService.streamChat(agent.llmProvider as 'claude' | 'gpt' | 'gemini', llmMessages, tools, systemPrompt)) {
+      // Stream the LLM response using effective model (may be overridden)
+      for await (const chunk of llmService.streamChat(effectiveModel as 'claude' | 'gpt' | 'gemini', llmMessages, tools, systemPrompt)) {
         if (chunk.type === 'token') {
           // Stream text token to client
           assistantMessage += chunk.content
@@ -2951,12 +3000,19 @@ Remember: Be friendly in greetings/small talk, but redirect non-API questions to
             input: toolCall.input
           })
 
-          // CRITICAL: Validate agent has access to this tool (tool-gating constraint)
-          const hasAccess = agentToolService.hasToolAccess(agent, toolCall.name)
+          // CRITICAL: Validate tool is in the active tool list (may be overridden)
+          // Use overridden tools if provided, otherwise use agent's default tools
+          const activeTools = toolsOverride || agent.availableTools
+          const hasAccess = activeTools.some(toolId => {
+            const [s, a] = toolId.split('/')
+            const generatedToolName = `call_${s}_${a}`.replace(/-/g, '_').toLowerCase()
+            return generatedToolName === toolCall.name.toLowerCase()
+          })
+
           if (!hasAccess) {
             console.warn(`⚠️  UNAUTHORIZED TOOL ACCESS: Agent ${agent.id} attempted to call ${toolCall.name}`)
             sendEvent('error', {
-              message: `Access denied. This agent is not authorized to use the ${toolCall.name} tool.`
+              message: `Access denied. This tool is not in the current active tool list.`
             })
             continue // Skip and continue
           }
@@ -2966,7 +3022,7 @@ Remember: Be friendly in greetings/small talk, but redirect non-API questions to
           let serverSlug = ''
           let apiSlug = ''
 
-          for (const toolString of agent.availableTools) {
+          for (const toolString of activeTools) {
             const [s, a] = toolString.split('/')
             const generatedToolName = `call_${s}_${a}`.replace(/-/g, '_').toLowerCase()
             if (generatedToolName === toolCall.name.toLowerCase()) {
