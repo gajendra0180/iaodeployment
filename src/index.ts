@@ -51,8 +51,19 @@ config()
 
 const app = express()
 
-// Add CORS middleware
-app.use(cors())
+// Add CORS middleware with explicit configuration
+const corsOptions = {
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'PAYMENT-SIGNATURE', 'X-Api-Version'],
+  credentials: true,
+  optionsSuccessStatus: 200
+}
+app.use(cors(corsOptions))
+
+// Handle preflight OPTIONS requests explicitly
+app.options('*', cors(corsOptions))
+
 app.use(express.json())
 
 // Serve static files from public directory (built frontend)
