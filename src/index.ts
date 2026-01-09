@@ -2634,6 +2634,8 @@ app.post('/api/chat/playground', async (req, res) => {
     // Build tools from toolIds (format: "serverSlug/apiSlug")
     const servers = await agentToolService.fetchAvailableServers()
     const tools: any[] = []
+    // Map tool names back to original slugs for execution
+    const toolNameToSlugs: Record<string, { serverSlug: string; apiSlug: string }> = {}
 
     for (const toolId of toolIds) {
       const [serverSlug, apiSlug] = toolId.split('/')
@@ -2644,6 +2646,10 @@ app.post('/api/chat/playground', async (req, res) => {
       if (!api) continue
 
       const toolName = `call_${serverSlug}_${apiSlug}`.replace(/-/g, '_').toLowerCase()
+
+      // Store mapping for later execution
+      toolNameToSlugs[toolName] = { serverSlug, apiSlug }
+
       tools.push({
         name: toolName,
         description: `${api.name || api.slug} - ${api.description || 'No description'}. Fee: ${api.fee} wei`,
@@ -2746,8 +2752,66 @@ Example: If user asks about games and you have a games API tool, CALL IT to get 
         break
       }
 
-      // Execute tool calls
-      const toolResults = await agentToolService.executeTools(collectedToolCalls, mockAgent as any)
+      // Execute tool calls using the slug mapping (not parsing tool names)
+      const toolResults: Array<{ toolName: string; success: boolean; result?: any; error?: string }> = []
+
+      for (const toolCall of collectedToolCalls) {
+        const slugs = toolNameToSlugs[toolCall.name.toLowerCase()]
+        if (!slugs) {
+          toolResults.push({
+            toolName: toolCall.name,
+            success: false,
+            error: `Unknown tool: ${toolCall.name}`
+          })
+          continue
+        }
+
+        const { serverSlug, apiSlug } = slugs
+        console.log(`🔧 Executing playground tool: ${toolCall.name} -> ${serverSlug}/${apiSlug}`)
+
+        try {
+          // Build API URL
+          const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000'
+          let queryParam = ''
+          if (toolCall.input?.query) {
+            const query = toolCall.input.query.trim()
+            queryParam = query.startsWith('?') ? query : `?${query}`
+          }
+
+          const apiUrl = `${backendUrl}/api/${serverSlug}/${apiSlug}${queryParam}`
+          console.log(`🌐 Calling API: ${apiUrl}`)
+
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 30000)
+
+          const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal
+          })
+
+          clearTimeout(timeout)
+
+          if (!response.ok) {
+            const errorText = await response.text()
+            throw new Error(`API returned ${response.status}: ${errorText}`)
+          }
+
+          const result = await response.json()
+          toolResults.push({
+            toolName: toolCall.name,
+            success: true,
+            result
+          })
+        } catch (err: any) {
+          console.error(`Tool execution error for ${toolCall.name}:`, err.message)
+          toolResults.push({
+            toolName: toolCall.name,
+            success: false,
+            error: err.message
+          })
+        }
+      }
 
       // Send tool results
       for (const result of toolResults) {
@@ -2759,6 +2823,15 @@ Example: If user asks about games and you have a games API tool, CALL IT to get 
         })
       }
 
+      // Format tool results for LLM
+      const formattedResults = toolResults.map(r => {
+        if (r.success) {
+          return `✅ ${r.toolName}:\n${JSON.stringify(r.result, null, 2)}`
+        } else {
+          return `❌ ${r.toolName}: ${r.error}`
+        }
+      }).join('\n\n')
+
       // Add assistant message with tool use and results to conversation
       currentMessages = [
         ...currentMessages,
@@ -2768,7 +2841,7 @@ Example: If user asks about games and you have a games API tool, CALL IT to get 
         },
         {
           role: 'user' as const,
-          content: `Tool results:\n${agentToolService.formatToolResults(toolResults)}`
+          content: `Tool results:\n${formattedResults}`
         }
       ]
     }
