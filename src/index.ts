@@ -2593,6 +2593,180 @@ app.post('/api/chat/message', async (req, res) => {
   }
 })
 
+// POST /api/chat/playground - Ephemeral chat without session persistence
+app.post('/api/chat/playground', async (req, res) => {
+  try {
+    const { message, model, tools: toolIds, conversationHistory, userAddress } = req.body
+
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" })
+    }
+
+    if (!toolIds || toolIds.length === 0) {
+      return res.status(400).json({ error: "At least one tool is required for playground chat" })
+    }
+
+    if (!llmService || !agentToolService) {
+      return res.status(503).json({ error: "Required services not initialized" })
+    }
+
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders()
+
+    const sendEvent = (type: string, data: any) => {
+      res.write(`data: ${JSON.stringify({ type, data })}\n\n`)
+    }
+
+    // Build tools from toolIds (format: "serverSlug/apiSlug")
+    const servers = await agentToolService.fetchAvailableServers()
+    const tools: any[] = []
+
+    for (const toolId of toolIds) {
+      const [serverSlug, apiSlug] = toolId.split('/')
+      const server = servers.find((s: any) => s.slug.toLowerCase() === serverSlug.toLowerCase())
+      if (!server) continue
+
+      const api = server.apis?.find((a: any) => a.slug.toLowerCase() === apiSlug.toLowerCase())
+      if (!api) continue
+
+      const toolName = `call_${serverSlug}_${apiSlug}`.replace(/-/g, '_').toLowerCase()
+      tools.push({
+        name: toolName,
+        description: `${api.name || api.slug} - ${api.description || 'No description'}. Fee: ${api.fee} wei`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Query parameters for the API call (e.g., "base=USD" or "latitude=52.52&longitude=13.41")'
+            }
+          },
+          required: []
+        }
+      })
+    }
+
+    if (tools.length === 0) {
+      sendEvent('error', { message: 'No valid tools found for the selected APIs' })
+      res.end()
+      return
+    }
+
+    // Build conversation for LLM
+    const llmMessages = [
+      ...(conversationHistory || []).map((m: any) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content
+      })),
+      { role: 'user' as const, content: message }
+    ]
+
+    // System prompt for playground
+    const systemPrompt = `You are a helpful AI assistant in a playground environment. You have access to the following APIs:
+
+${tools.map(t => `• ${t.name.replace('call_', '').replace(/_/g, ' ')}: ${t.description}`).join('\n')}
+
+When users ask questions that your APIs can help with, use the appropriate tool to fetch data.
+Be helpful, conversational, and explain your answers clearly.`
+
+    console.log(`🎮 Playground: Processing message with ${tools.length} tools`)
+
+    // Create mock agent for tool execution
+    const mockAgent = {
+      id: 'playground',
+      name: 'Playground',
+      description: 'Playground agent',
+      creator: userAddress || 'anonymous',
+      llmProvider: model || 'claude',
+      availableTools: toolIds,
+      starterPrompts: [],
+      isPublic: false,
+      totalMessages: 0,
+      totalUsers: 0,
+      totalToolCalls: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+
+    // Agentic loop - max 5 iterations
+    let currentMessages = llmMessages
+    let iterationCount = 0
+    const maxIterations = 5
+
+    while (iterationCount < maxIterations) {
+      iterationCount++
+
+      // Use the async generator to stream responses
+      let responseContent = ''
+      const collectedToolCalls: any[] = []
+
+      for await (const chunk of llmService.streamChat(
+        (model as 'claude' | 'gpt' | 'gemini') || 'claude',
+        currentMessages,
+        tools,
+        systemPrompt
+      )) {
+        if (chunk.type === 'token') {
+          responseContent += chunk.content
+          sendEvent('token', { content: chunk.content })
+        } else if (chunk.type === 'tool_call') {
+          collectedToolCalls.push(chunk.tool)
+          sendEvent('tool_call', {
+            name: chunk.tool.name,
+            input: chunk.tool.input,
+            description: chunk.tool.name.replace('call_', '').replace(/_/g, ' ')
+          })
+        }
+      }
+
+      // If no tool calls, we're done
+      if (collectedToolCalls.length === 0) {
+        break
+      }
+
+      // Execute tool calls
+      const toolResults = await agentToolService.executeTools(collectedToolCalls, mockAgent as any)
+
+      // Send tool results
+      for (const result of toolResults) {
+        sendEvent('tool_result', {
+          toolName: result.toolName,
+          success: result.success,
+          result: result.result,
+          error: result.error
+        })
+      }
+
+      // Add assistant message with tool use and results to conversation
+      currentMessages = [
+        ...currentMessages,
+        {
+          role: 'assistant' as const,
+          content: responseContent || ''
+        },
+        {
+          role: 'user' as const,
+          content: `Tool results:\n${agentToolService.formatToolResults(toolResults)}`
+        }
+      ]
+    }
+
+    sendEvent('done', {})
+    res.end()
+  } catch (error: any) {
+    console.error('Playground chat error:', error)
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'error', data: { message: error.message } })}\n\n`)
+      res.end()
+    } catch {
+      // Response already ended
+    }
+  }
+})
+
 // GET /api/chat/stream/:sessionId - SSE endpoint for streaming responses with agentic loop
 app.get('/api/chat/stream/:sessionId', async (req, res) => {
   try {
