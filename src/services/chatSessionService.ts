@@ -113,6 +113,47 @@ export class ChatSessionService {
   }
 
   /**
+   * Force create a new session (for "New Chat" button)
+   * Always creates a new session regardless of existing ones
+   */
+  async createNewSession(
+    agentId: string,
+    userAddress: string
+  ): Promise<ChatSession> {
+    const userAddressLower = userAddress.toLowerCase()
+
+    try {
+      const now = new Date().toISOString()
+      const session: ChatSession = {
+        id: uuidv4(),
+        agentId,
+        userAddress: userAddressLower,
+        messageCount: 0,
+        lastMessageAt: now,
+        createdAt: now,
+      }
+
+      await this.docClient.send(
+        new PutCommand({
+          TableName: this.sessionsTableName,
+          Item: session,
+        })
+      )
+
+      console.log(
+        `✅ Force created new session: ${session.id} (agent: ${agentId}, user: ${userAddressLower})`
+      )
+      return session
+    } catch (error) {
+      console.error(
+        `❌ Failed to create new session for agent ${agentId}, user ${userAddressLower}:`,
+        error
+      )
+      throw error
+    }
+  }
+
+  /**
    * Find session by agent and user (using GSI)
    */
   private async findSessionByAgentAndUser(
