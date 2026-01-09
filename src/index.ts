@@ -2604,6 +2604,117 @@ app.post('/api/chat/message', async (req, res) => {
   }
 })
 
+// Generate mock responses for playground testing
+function generateMockResponse(apiSlug: string, input?: any): any {
+  const slug = apiSlug.toLowerCase()
+
+  // Games related
+  if (slug.includes('game')) {
+    return {
+      _mock: true,
+      games: [
+        { id: 1, name: "Cyber Quest 2077", genre: "RPG", rating: 4.8, players: "125K" },
+        { id: 2, name: "Space Warriors", genre: "Action", rating: 4.5, players: "89K" },
+        { id: 3, name: "Puzzle Master", genre: "Puzzle", rating: 4.9, players: "200K" },
+        { id: 4, name: "Racing Legends", genre: "Racing", rating: 4.3, players: "67K" },
+        { id: 5, name: "Fantasy Kingdom", genre: "Strategy", rating: 4.7, players: "150K" }
+      ],
+      total: 5
+    }
+  }
+
+  // GitHub/Users related
+  if (slug.includes('github') || slug.includes('user')) {
+    return {
+      _mock: true,
+      users: [
+        { login: "octocat", id: 583231, type: "User", public_repos: 8 },
+        { login: "torvalds", id: 1024025, type: "User", public_repos: 6 },
+        { login: "gaearon", id: 810438, type: "User", public_repos: 95 }
+      ]
+    }
+  }
+
+  // Currency/Exchange related
+  if (slug.includes('currency') || slug.includes('exchange') || slug.includes('convert')) {
+    const base = input?.query?.match(/base=(\w+)/)?.[1] || 'USD'
+    return {
+      _mock: true,
+      base: base,
+      date: new Date().toISOString().split('T')[0],
+      rates: {
+        EUR: 0.92,
+        GBP: 0.79,
+        JPY: 149.50,
+        CAD: 1.36,
+        AUD: 1.53
+      }
+    }
+  }
+
+  // Weather related
+  if (slug.includes('weather') || slug.includes('forecast')) {
+    return {
+      _mock: true,
+      location: "San Francisco, CA",
+      temperature: 68,
+      unit: "F",
+      condition: "Partly Cloudy",
+      humidity: 65,
+      wind: "12 mph NW"
+    }
+  }
+
+  // Hype/Stats related
+  if (slug.includes('hype') || slug.includes('stats') || slug.includes('metrics')) {
+    return {
+      _mock: true,
+      totalHype: 1250000,
+      activeUsers: 45000,
+      dailyTransactions: 12500,
+      trending: ["DeFi", "Gaming", "NFTs"]
+    }
+  }
+
+  // Referral related
+  if (slug.includes('referral') || slug.includes('key')) {
+    return {
+      _mock: true,
+      referralCode: "PLAY-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      bonus: "10%",
+      validUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    }
+  }
+
+  // Price/Market related
+  if (slug.includes('price') || slug.includes('market') || slug.includes('crypto')) {
+    return {
+      _mock: true,
+      assets: [
+        { symbol: "BTC", price: 67500.00, change24h: 2.5 },
+        { symbol: "ETH", price: 3450.00, change24h: 1.8 },
+        { symbol: "SOL", price: 145.00, change24h: 4.2 }
+      ]
+    }
+  }
+
+  // Default generic response
+  return {
+    _mock: true,
+    message: "Mock data for playground testing",
+    apiSlug: apiSlug,
+    timestamp: new Date().toISOString(),
+    data: {
+      status: "success",
+      items: [
+        { id: 1, name: "Sample Item 1", value: 100 },
+        { id: 2, name: "Sample Item 2", value: 200 },
+        { id: 3, name: "Sample Item 3", value: 300 }
+      ]
+    }
+  }
+}
+
 // POST /api/chat/playground - Ephemeral chat without session persistence
 app.post('/api/chat/playground', async (req, res) => {
   try {
@@ -2766,50 +2877,15 @@ RULES:
         }
 
         const { serverSlug, apiSlug } = slugs
-        console.log(`🔧 Executing playground tool: ${toolCall.name} -> ${serverSlug}/${apiSlug}`)
+        console.log(`🔧 Executing playground tool (MOCK): ${toolCall.name} -> ${serverSlug}/${apiSlug}`)
 
-        try {
-          // Build API URL
-          const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000'
-          let queryParam = ''
-          if (toolCall.input?.query) {
-            const query = toolCall.input.query.trim()
-            queryParam = query.startsWith('?') ? query : `?${query}`
-          }
-
-          const apiUrl = `${backendUrl}/api/${serverSlug}/${apiSlug}${queryParam}`
-          console.log(`🌐 Calling API: ${apiUrl}`)
-
-          const controller = new AbortController()
-          const timeout = setTimeout(() => controller.abort(), 30000)
-
-          const response = await fetch(apiUrl, {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal
-          })
-
-          clearTimeout(timeout)
-
-          if (!response.ok) {
-            const errorText = await response.text()
-            throw new Error(`API returned ${response.status}: ${errorText}`)
-          }
-
-          const result = await response.json()
-          toolResults.push({
-            toolName: toolCall.name,
-            success: true,
-            result
-          })
-        } catch (err: any) {
-          console.error(`Tool execution error for ${toolCall.name}:`, err.message)
-          toolResults.push({
-            toolName: toolCall.name,
-            success: false,
-            error: err.message
-          })
-        }
+        // Generate mock response based on API type
+        const mockResult = generateMockResponse(apiSlug, toolCall.input)
+        toolResults.push({
+          toolName: toolCall.name,
+          success: true,
+          result: mockResult
+        })
       }
 
       // Send tool results
