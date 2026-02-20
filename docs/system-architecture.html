@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>System Architecture</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #0f172a; min-height: 100vh; }
+    body { padding: 32px; }
+    h1 {
+      color: #f87171;
+      text-align: center;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      margin-bottom: 32px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: none !important; }
+  </style>
+</head>
+<body>
+  <h1>IAO System Architecture</h1>
+  <div class="mermaid">
+flowchart TB
+    subgraph USERS["<b>Users</b>"]
+        U1["API Consumer"]
+        U2["API Builder"]
+    end
+
+    subgraph FRONTEND["<b>Frontend (Firebase Hosting)</b>"]
+        F1["React SPA"]
+        F2["Thirdweb SDK"]
+        F3["Wallet Connect"]
+    end
+
+    subgraph BACKEND["<b>Backend (Cloud Run)</b>"]
+        B1["Express.js Proxy"]
+        B2["Payment Verification"]
+        B3["JWT Auth"]
+        B4["Metrics Service"]
+    end
+
+    subgraph DATABASE["<b>Database (Firestore)</b>"]
+        D1["iao-tokens"]
+        D2["request-queue"]
+        D3["chat-sessions"]
+        D4["api-metrics"]
+    end
+
+    subgraph AUTOMATION["<b>Automation (Cloud Run)</b>"]
+        A1["Queue Poller"]
+        A2["Batch Processor"]
+    end
+
+    subgraph BLOCKCHAIN["<b>Blockchain (Base)</b>"]
+        C1["IAOTokenFactory"]
+        C2["IAOToken"]
+        C3["Uniswap V4"]
+        C4["LpGuardHook"]
+    end
+
+    subgraph EXTERNAL["<b>External Services</b>"]
+        E1["Builder APIs"]
+        E2["Thirdweb Facilitator"]
+        E3["AI Providers"]
+    end
+
+    U1 --> F1
+    U2 --> F1
+    F1 --> F2
+    F2 --> F3
+    F3 --> C1
+
+    F1 --> B1
+    B1 --> B2
+    B1 --> B3
+    B1 --> B4
+
+    B1 --> D1
+    B1 --> D2
+    B1 --> D3
+    B4 --> D4
+
+    B2 --> E2
+    B1 --> E1
+    B1 --> E3
+
+    E2 --> C2
+
+    A1 --> D2
+    A2 --> C2
+
+    C2 --> C3
+    C3 --> C4
+
+    style U1 fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style U2 fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style F1 fill:#0891b2,stroke:#22d3ee,color:#fff
+    style F2 fill:#0891b2,stroke:#22d3ee,color:#fff
+    style F3 fill:#0891b2,stroke:#22d3ee,color:#fff
+    style B1 fill:#059669,stroke:#34d399,color:#fff
+    style B2 fill:#059669,stroke:#34d399,color:#fff
+    style B3 fill:#059669,stroke:#34d399,color:#fff
+    style B4 fill:#059669,stroke:#34d399,color:#fff
+    style D1 fill:#d97706,stroke:#fbbf24,color:#fff
+    style D2 fill:#d97706,stroke:#fbbf24,color:#fff
+    style D3 fill:#d97706,stroke:#fbbf24,color:#fff
+    style D4 fill:#d97706,stroke:#fbbf24,color:#fff
+    style A1 fill:#ec4899,stroke:#f472b6,color:#fff
+    style A2 fill:#ec4899,stroke:#f472b6,color:#fff
+    style C1 fill:#dc2626,stroke:#f87171,color:#fff
+    style C2 fill:#dc2626,stroke:#f87171,color:#fff
+    style C3 fill:#dc2626,stroke:#f87171,color:#fff
+    style C4 fill:#dc2626,stroke:#f87171,color:#fff
+    style E1 fill:#475569,stroke:#64748b,color:#fff
+    style E2 fill:#475569,stroke:#64748b,color:#fff
+    style E3 fill:#475569,stroke:#64748b,color:#fff
+  </div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+      themeVariables: {
+        primaryColor: '#7c3aed',
+        primaryTextColor: '#f1f5f9',
+        primaryBorderColor: '#a78bfa',
+        lineColor: '#94a3b8',
+        secondaryColor: '#1e293b',
+        background: '#0f172a',
+        mainBkg: '#1e293b',
+        clusterBkg: '#1e293b',
+        clusterBorder: '#475569'
+      }
+    });
+  </script>
+</body>
+</html>

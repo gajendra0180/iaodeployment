@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Fee Distribution Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #0f172a; min-height: 100vh; }
+    body { padding: 32px; }
+    h1 {
+      color: #f87171;
+      text-align: center;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      margin-bottom: 32px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Fee Distribution Flow</h1>
+  <div class="mermaid">
+flowchart TD
+    subgraph PAYMENT["<b>Payment Received</b>"]
+        A["User pays API fee<br/>(e.g., 1 USDC)"] --> B["Payment settled<br/>via Thirdweb"]
+        B --> C["USDC transferred<br/>to IAOToken"]
+    end
+
+    C --> D{"Token graduated?"}
+
+    subgraph PREBOND["<b>Pre-Graduation Fee Split</b>"]
+        D -->|No| E["Split fee:"]
+        E --> F["40% → Builder wallet"]
+        E --> G["10% → Team wallet"]
+        E --> H["50% → Liquidity reserve<br/>(stays in contract)"]
+    end
+
+    subgraph POSTGRAD["<b>Post-Graduation Fee Split</b>"]
+        D -->|Yes| I["Split fee:"]
+        I --> J["70% → Builder wallet"]
+        I --> K["10% → Team wallet"]
+        I --> L["20% → Buyback"]
+    end
+
+    subgraph PRE_EXAMPLE["<b>Pre-Grad Example (1 USDC)</b>"]
+        M["1 USDC Payment"] --> N["0.40 USDC → Builder"]
+        M --> O["0.10 USDC → Team"]
+        M --> P["0.50 USDC → LP Reserve"]
+    end
+
+    subgraph POST_EXAMPLE["<b>Post-Grad Example (1 USDC)</b>"]
+        Q["1 USDC Payment"] --> R["0.70 USDC → Builder"]
+        Q --> S["0.10 USDC → Team"]
+        Q --> T["0.20 USDC → Buyback"]
+    end
+
+    H --> U["Used at graduation<br/>for Uniswap V4 LP"]
+    L --> V["Token buyback<br/>& burn/redistribute"]
+
+    style A fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style B fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style C fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style D fill:#d97706,stroke:#fbbf24,color:#fff
+    style E fill:#059669,stroke:#34d399,color:#fff
+    style F fill:#ec4899,stroke:#f472b6,color:#fff
+    style G fill:#ec4899,stroke:#f472b6,color:#fff
+    style H fill:#ec4899,stroke:#f472b6,color:#fff
+    style I fill:#0891b2,stroke:#22d3ee,color:#fff
+    style J fill:#0891b2,stroke:#22d3ee,color:#fff
+    style K fill:#0891b2,stroke:#22d3ee,color:#fff
+    style L fill:#0891b2,stroke:#22d3ee,color:#fff
+    style M fill:#475569,stroke:#64748b,color:#fff
+    style N fill:#475569,stroke:#64748b,color:#fff
+    style O fill:#475569,stroke:#64748b,color:#fff
+    style P fill:#475569,stroke:#64748b,color:#fff
+    style Q fill:#475569,stroke:#64748b,color:#fff
+    style R fill:#475569,stroke:#64748b,color:#fff
+    style S fill:#475569,stroke:#64748b,color:#fff
+    style T fill:#475569,stroke:#64748b,color:#fff
+    style U fill:#059669,stroke:#34d399,color:#fff
+    style V fill:#059669,stroke:#34d399,color:#fff
+  </div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+      themeVariables: {
+        primaryColor: '#7c3aed',
+        primaryTextColor: '#f1f5f9',
+        primaryBorderColor: '#a78bfa',
+        lineColor: '#94a3b8',
+        secondaryColor: '#1e293b',
+        background: '#0f172a',
+        mainBkg: '#1e293b',
+        clusterBkg: '#1e293b',
+        clusterBorder: '#475569'
+      }
+    });
+  </script>
+</body>
+</html>

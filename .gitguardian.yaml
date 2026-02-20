@@ -1,0 +1,11 @@
+# GitGuardian configuration
+# Ignore false positives for public blockchain addresses
+
+paths-ignore:
+  - '**/test-*.js'
+  - '**/insert-test-data.js'
+
+matches-ignore:
+  # Solana USDC Devnet mint address (public, not a secret)
+  - match: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+    name: "Solana USDC Devnet Address"

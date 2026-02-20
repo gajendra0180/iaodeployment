@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "buildCommand": "yarn build",
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.js"
+    }
+  ]
+}

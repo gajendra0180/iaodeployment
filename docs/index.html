@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IAO Documentation</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      min-height: 100vh;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      padding: 40px 20px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #f1f5f9;
+      font-size: 36px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+    .subtitle {
+      color: #94a3b8;
+      font-size: 18px;
+      margin-bottom: 48px;
+      text-align: center;
+    }
+    .section-title {
+      color: #e2e8f0;
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 16px;
+      margin-top: 32px;
+      padding-left: 8px;
+      border-left: 3px solid #7c3aed;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }
+    .card {
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 24px;
+      text-decoration: none;
+      transition: all 0.2s ease;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: #7c3aed;
+      box-shadow: 0 20px 40px rgba(124, 58, 237, 0.2);
+    }
+    .card h2 {
+      color: #f1f5f9;
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .card p {
+      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .card .icon {
+      font-size: 28px;
+      margin-bottom: 12px;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 12px;
+      margin-top: 12px;
+    }
+    .badge-sequence { background: #7c3aed; color: #fff; }
+    .badge-flowchart { background: #0891b2; color: #fff; }
+    .badge-architecture { background: #059669; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>IAO Flow Documentation</h1>
+    <p class="subtitle">Interactive diagrams for the Initial API Offering system</p>
+
+    <div class="section-title">Core Flows</div>
+    <div class="cards">
+      <a href="token-creation-flow.html" class="card">
+        <div class="icon">🏭</div>
+        <h2>Token Creation</h2>
+        <p>Server registration and IAO token creation via IAOTokenFactory smart contract.</p>
+        <span class="badge badge-sequence">Sequence</span>
+      </a>
+
+      <a href="token-distribution-flow.html" class="card">
+        <div class="icon">💰</div>
+        <h2>Token Distribution</h2>
+        <p>Payment processing, automation batching, on-chain minting, and fee distribution.</p>
+        <span class="badge badge-flowchart">Flowchart</span>
+      </a>
+
+      <a href="api-call-flow.html" class="card">
+        <div class="icon">🔌</div>
+        <h2>API Call (x402)</h2>
+        <p>How users pay for API calls using EIP-3009 signatures and the x402 protocol.</p>
+        <span class="badge badge-sequence">Sequence</span>
+      </a>
+
+      <a href="graduation-flow.html" class="card">
+        <div class="icon">🎓</div>
+        <h2>Graduation</h2>
+        <p>What happens when 625M tokens are distributed - Uniswap V4 liquidity deployment.</p>
+        <span class="badge badge-flowchart">Flowchart</span>
+      </a>
+    </div>
+
+    <div class="section-title">Builder & Agent Flows</div>
+    <div class="cards">
+      <a href="builder-registration-flow.html" class="card">
+        <div class="icon">👷</div>
+        <h2>Builder Registration</h2>
+        <p>How builders register their APIs - validation, on-chain token creation, and storage.</p>
+        <span class="badge badge-flowchart">Flowchart</span>
+      </a>
+
+      <a href="agent-chat-flow.html" class="card">
+        <div class="icon">🤖</div>
+        <h2>Agent Chat</h2>
+        <p>AI agent conversation flow with payment, session management, and streaming responses.</p>
+        <span class="badge badge-sequence">Sequence</span>
+      </a>
+
+      <a href="fee-distribution-flow.html" class="card">
+        <div class="icon">💸</div>
+        <h2>Fee Distribution</h2>
+        <p>How fees are split: 40% builder, 10% team, 50% liquidity reserve.</p>
+        <span class="badge badge-flowchart">Flowchart</span>
+      </a>
+    </div>
+
+    <div class="section-title">Architecture</div>
+    <div class="cards">
+      <a href="system-architecture.html" class="card">
+        <div class="icon">🏗️</div>
+        <h2>System Architecture</h2>
+        <p>Overview of all components: Frontend, Backend, Database, Blockchain, and External services.</p>
+        <span class="badge badge-architecture">Architecture</span>
+      </a>
+    </div>
+  </div>
+</body>
+</html>

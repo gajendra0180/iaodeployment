@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Chat Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #0f172a; min-height: 100vh; }
+    body { padding: 32px; }
+    h1 {
+      color: #f87171;
+      text-align: center;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      margin-bottom: 32px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: none !important; }
+  </style>
+</head>
+<body>
+  <h1>AI Agent Chat Flow</h1>
+  <div class="mermaid">
+sequenceDiagram
+    participant U as User
+    participant F as Frontend
+    participant B as Backend
+    participant DB as Firestore
+    participant AI as AI Provider<br/>(Claude/GPT/Gemini)
+
+    U->>F: 1. Open agent chat
+    F->>B: 2. GET /api/agents/:id
+    B->>DB: 3. Fetch agent config
+    DB->>B: 4. Agent details + system prompt
+    B->>F: 5. Return agent info
+
+    U->>F: 6. Send message
+    F->>B: 7. POST /api/chat/message<br/>+ payment signature
+
+    B->>B: 8. Verify payment
+    B->>DB: 9. Get/create session
+    B->>DB: 10. Load chat history
+
+    B->>AI: 11. Send prompt + history
+    AI->>B: 12. Stream response
+
+    B->>DB: 13. Save user message
+    B->>DB: 14. Save AI response
+    B->>B: 15. Settle payment
+
+    B->>F: 16. Stream response
+    F->>U: 17. Display message
+  </div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      sequence: {
+        actorMargin: 30,
+        messageMargin: 25,
+        mirrorActors: false
+      },
+      themeVariables: {
+        primaryColor: '#7c3aed',
+        primaryTextColor: '#f1f5f9',
+        primaryBorderColor: '#a78bfa',
+        lineColor: '#94a3b8',
+        actorBkg: '#1e293b',
+        actorBorder: '#7c3aed',
+        actorTextColor: '#f1f5f9',
+        signalColor: '#94a3b8',
+        signalTextColor: '#f1f5f9',
+        noteBkgColor: '#7c3aed',
+        noteTextColor: '#fff'
+      }
+    });
+  </script>
+</body>
+</html>

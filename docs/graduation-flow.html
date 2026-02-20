@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Graduation Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #0f172a; min-height: 100vh; }
+    body { padding: 32px; }
+    h1 {
+      color: #f87171;
+      text-align: center;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      margin-bottom: 32px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Token Graduation Flow (625M Threshold)</h1>
+  <div class="mermaid">
+flowchart TD
+    subgraph BONDING["<b>Bonding Curve Phase</b>"]
+        A["API Payment Received"] --> B["Calculate token amount"]
+        B --> C["Mint tokens to user"]
+        C --> D["Update totalTokensDistributed"]
+        D --> E{"totalDistributed >= 625M?"}
+    end
+
+    E -->|No| F["Continue bonding curve"]
+    F --> G["Distribute fees"]
+    G --> A
+
+    E -->|Yes| H["<b>GRADUATION TRIGGERED</b>"]
+
+    subgraph GRAD["<b>Graduation Process</b>"]
+        H --> I["Transfer remaining tokens<br/>from builder to contract"]
+        I --> J["Calculate liquidity amounts<br/>(50% fees + unsold tokens)"]
+        J --> K["Deploy LpGuardHook"]
+        K --> L["Create Uniswap V4 Pool"]
+        L --> M["Add initial liquidity"]
+        M --> N["Set liquidityDeployed = true"]
+    end
+
+    subgraph POST["<b>Post-Graduation</b>"]
+        N --> O["Token tradeable on Uniswap"]
+        O --> P["LP locked via LpGuardHook"]
+        P --> Q["New fee split: 70/10/20"]
+    end
+
+    style A fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style B fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style C fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style D fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style E fill:#d97706,stroke:#fbbf24,color:#fff
+    style F fill:#059669,stroke:#34d399,color:#fff
+    style G fill:#059669,stroke:#34d399,color:#fff
+    style H fill:#dc2626,stroke:#f87171,color:#fff
+    style I fill:#dc2626,stroke:#f87171,color:#fff
+    style J fill:#dc2626,stroke:#f87171,color:#fff
+    style K fill:#dc2626,stroke:#f87171,color:#fff
+    style L fill:#dc2626,stroke:#f87171,color:#fff
+    style M fill:#dc2626,stroke:#f87171,color:#fff
+    style N fill:#dc2626,stroke:#f87171,color:#fff
+    style O fill:#0891b2,stroke:#22d3ee,color:#fff
+    style P fill:#0891b2,stroke:#22d3ee,color:#fff
+    style Q fill:#0891b2,stroke:#22d3ee,color:#fff
+  </div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+      themeVariables: {
+        primaryColor: '#7c3aed',
+        primaryTextColor: '#f1f5f9',
+        primaryBorderColor: '#a78bfa',
+        lineColor: '#94a3b8',
+        secondaryColor: '#1e293b',
+        background: '#0f172a',
+        mainBkg: '#1e293b',
+        clusterBkg: '#1e293b',
+        clusterBorder: '#475569',
+        titleColor: '#f87171'
+      }
+    });
+  </script>
+</body>
+</html>

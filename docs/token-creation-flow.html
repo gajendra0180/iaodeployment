@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Server Token Creation Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    body {
+      background: #1a1a2e;
+      padding: 40px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    .container {
+      background: #16213e;
+      border-radius: 16px;
+      padding: 30px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+    h1 {
+      color: #e94560;
+      text-align: center;
+      font-family: 'Segoe UI', sans-serif;
+      margin-bottom: 20px;
+      font-size: 24px;
+    }
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Server Token Creation Flow</h1>
+    <div class="mermaid">
+sequenceDiagram
+    participant F as Frontend<br/>(React)
+    participant B as Backend<br/>(Cloud Run)
+    participant W as User Wallet
+    participant C as IAOTokenFactory<br/>(Base Sepolia)
+    participant T as IAOToken<br/>(New Clone)
+
+    F->>B: 1. POST /api/register (validate)
+    B->>B: 2. Validate slug, API URLs
+    B-->>F: 3. Validation OK
+
+    F->>W: 4. Request signature
+    W->>C: 5. createToken(params)
+
+    Note over C: 6. Validations:<br/>- Payment token exists<br/>- Builder not zero<br/>- Slug unique
+
+    C->>C: 7. Calculate graduation<br/>threshold (625M tokens)
+
+    C->>T: 8. Clone + Initialize
+
+    Note over T: 9. Set params:<br/>- graduationThreshold<br/>- paymentToken<br/>- owner = builder
+
+    T->>T: 10. _mint(builder, 1B tokens)
+
+    C-->>C: 11. Store: _getToken[slug] = token
+    C-->>W: 12. emit TokenCreated()
+    W-->>F: 13. Return tokenAddress
+
+    F->>B: 14. POST /api/register<br/>(with tokenAddress)
+    B->>B: 15. Store in Firestore:<br/>iao-tokens collection
+    B-->>F: 16. Success
+    </div>
+  </div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#e94560',
+        primaryTextColor: '#fff',
+        primaryBorderColor: '#e94560',
+        lineColor: '#0f3460',
+        secondaryColor: '#0f3460',
+        tertiaryColor: '#1a1a2e',
+        background: '#16213e',
+        mainBkg: '#16213e',
+        secondBkg: '#0f3460',
+        actorBkg: '#0f3460',
+        actorBorder: '#e94560',
+        actorTextColor: '#fff',
+        signalColor: '#e94560',
+        signalTextColor: '#fff',
+        noteBkgColor: '#533483',
+        noteTextColor: '#fff',
+        noteBorderColor: '#e94560'
+      },
+      sequence: {
+        actorMargin: 50,
+        boxMargin: 10,
+        boxTextMargin: 5,
+        noteMargin: 10,
+        messageMargin: 35,
+        mirrorActors: false
+      }
+    });
+  </script>
+</body>
+</html>

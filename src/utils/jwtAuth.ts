@@ -29,9 +29,10 @@ export function generateBuilderJWT(
   };
 
   // Sign token with secret phrase using HS256 algorithm
+  // @ts-expect-error - jsonwebtoken types are strict about expiresIn format, but accepts string like "5m"
   const token = jwt.sign(payload, secretPhrase, {
     algorithm: 'HS256',
-    expiresIn,
+    expiresIn: expiresIn,
   });
 
   return token;

@@ -1,0 +1,36 @@
+flowchart TB
+    subgraph payment["Payment Flow"]
+        A[User signs EIP-3009] --> B[API call + signature]
+        B --> C[Backend verifies]
+        C --> D[Forward to Builder API]
+        D --> E{Success?}
+        E -->|2xx| F[settlePayment via Thirdweb]
+        F --> G[USDC to IAOToken]
+        G --> H[Queue in Firestore]
+        H --> I[Return response]
+    end
+
+    subgraph minting["Token Minting Async"]
+        J[Automation polls queue] --> K[Batch by token]
+        K --> L[batchMint]
+        L --> M[Transfer tokens]
+        M --> N[Update totals]
+        N --> O[Distribute fees]
+    end
+
+    subgraph fees["Fee Split"]
+        O --> P["40% Builder"]
+        O --> Q["10% Team"]
+        O --> R["50% Liquidity"]
+    end
+
+    subgraph graduation["Graduation 625M"]
+        S{Threshold?}
+        S -->|Yes| T[Deploy Hook]
+        T --> U[Init Uniswap V4]
+        U --> V[Mint LP]
+        V --> W[Done]
+    end
+
+    I --> J
+    N --> S

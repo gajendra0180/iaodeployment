@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Builder Registration Flow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #0f172a; min-height: 100vh; }
+    body { padding: 32px; }
+    h1 {
+      color: #f87171;
+      text-align: center;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      margin-bottom: 32px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    .mermaid svg { max-width: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Builder API Registration Flow</h1>
+  <div class="mermaid">
+flowchart TD
+    subgraph VALIDATE["<b>Step 1: Validation</b>"]
+        A["Builder fills form"] --> B["Submit without tokenAddress"]
+        B --> C["Backend validates:"]
+        C --> D["- Slug available?"]
+        D --> E["- API URLs return 200?"]
+        E --> F["- No duplicate APIs?"]
+        F --> G{"All valid?"}
+    end
+
+    G -->|No| H["Return errors"]
+    H --> A
+
+    G -->|Yes| I["Return validation OK"]
+
+    subgraph ONCHAIN["<b>Step 2: On-Chain</b>"]
+        I --> J["Frontend calls wallet"]
+        J --> K["IAOTokenFactory.createToken()"]
+        K --> L["Factory validates params"]
+        L --> M["Clone IAOToken"]
+        M --> N["Initialize token"]
+        N --> O["Mint 1B to builder"]
+        O --> P["Emit TokenCreated"]
+        P --> Q["Return tokenAddress"]
+    end
+
+    subgraph REGISTER["<b>Step 3: Registration</b>"]
+        Q --> R["Frontend submits with tokenAddress"]
+        R --> S["Backend stores in Firestore"]
+        S --> T["iao-tokens collection"]
+        T --> U["Registration complete!"]
+    end
+
+    style A fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style B fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style C fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style D fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style E fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style F fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style G fill:#d97706,stroke:#fbbf24,color:#fff
+    style H fill:#dc2626,stroke:#f87171,color:#fff
+    style I fill:#059669,stroke:#34d399,color:#fff
+    style J fill:#0891b2,stroke:#22d3ee,color:#fff
+    style K fill:#0891b2,stroke:#22d3ee,color:#fff
+    style L fill:#0891b2,stroke:#22d3ee,color:#fff
+    style M fill:#0891b2,stroke:#22d3ee,color:#fff
+    style N fill:#0891b2,stroke:#22d3ee,color:#fff
+    style O fill:#0891b2,stroke:#22d3ee,color:#fff
+    style P fill:#0891b2,stroke:#22d3ee,color:#fff
+    style Q fill:#0891b2,stroke:#22d3ee,color:#fff
+    style R fill:#ec4899,stroke:#f472b6,color:#fff
+    style S fill:#ec4899,stroke:#f472b6,color:#fff
+    style T fill:#ec4899,stroke:#f472b6,color:#fff
+    style U fill:#059669,stroke:#34d399,color:#fff
+  </div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+      themeVariables: {
+        primaryColor: '#7c3aed',
+        primaryTextColor: '#f1f5f9',
+        primaryBorderColor: '#a78bfa',
+        lineColor: '#94a3b8',
+        secondaryColor: '#1e293b',
+        background: '#0f172a',
+        mainBkg: '#1e293b',
+        clusterBkg: '#1e293b',
+        clusterBorder: '#475569'
+      }
+    });
+  </script>
+</body>
+</html>
